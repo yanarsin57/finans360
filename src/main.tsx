@@ -1,4 +1,11 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import { createRoot } from "react-dom/client";
 import {
   Target,
@@ -35,7 +42,6 @@ import {
   BarChart,
   CartesianGrid,
   Cell,
-  Legend,
   Pie,
   PieChart,
   ResponsiveContainer,
@@ -85,6 +91,9 @@ import {
   reviseOccurrence,
   statusOf,
 } from "./model.ts";
+import { Amount, Meter, axisAmount } from "./display.tsx";
+import { paymentItems } from "./model.ts";
+import { PinSettings, verifyPin } from "./PinSettings.tsx";
 import "./style.css";
 
 const today = day();
@@ -239,6 +248,45 @@ const field = (
 );
 const tl = (value: number | undefined) =>
   value === undefined ? "" : String(value / 100);
+function SelectField({
+  name,
+  label,
+  value,
+  options,
+  empty,
+}: {
+  name: string;
+  label: string;
+  value: string | undefined;
+  options: [string, string][];
+  empty?: string;
+}) {
+  const [selected, setSelected] = useState(
+    value ?? (empty ? "" : (options[0]?.[0] ?? "")),
+  );
+  const full = options.find(([id]) => id === selected)?.[1];
+  return (
+    <label>
+      {label}
+      <select
+        name={name}
+        value={selected}
+        onChange={(e) => setSelected(e.target.value)}
+        required={!empty}
+      >
+        {empty && <option value="">{empty}</option>}
+        {options.map(([id, text]) => (
+          <option key={id} value={id}>
+            {text}
+          </option>
+        ))}
+      </select>
+      {full && full.length > 24 && (
+        <small className="selected-label">{full}</small>
+      )}
+    </label>
+  );
+}
 const select = (
   name: string,
   label: string,
@@ -246,17 +294,13 @@ const select = (
   options: [string, string][],
   empty?: string,
 ) => (
-  <label>
-    {label}
-    <select name={name} defaultValue={value ?? ""} required={!empty}>
-      {empty && <option value="">{empty}</option>}
-      {options.map(([id, text]) => (
-        <option key={id} value={id}>
-          {text}
-        </option>
-      ))}
-    </select>
-  </label>
+  <SelectField
+    name={name}
+    label={label}
+    value={value}
+    options={options}
+    empty={empty}
+  />
 );
 const check = (name: string, label: string, value: boolean | undefined) => (
   <label className="check">
@@ -272,12 +316,14 @@ function Editor({
   save,
   remove,
   occurrence,
+  masked,
 }: {
   entry: Entry;
   rows: Data;
   close: () => void;
   save: (entry: Entry, scope: "one" | "future") => Promise<void>;
   occurrence?: boolean;
+  masked: boolean;
   remove: (entry: Entry) => Promise<void>;
 }) {
   const [error, setError] = useState("");
@@ -300,7 +346,10 @@ function Editor({
       ...rows.filter((e) => e.kind === "budget").map((e) => e.name),
     ]),
   ];
+  const saving = useRef(false);
   const execute = async (action: () => Promise<void>) => {
+    if (saving.current) return;
+    saving.current = true;
     setError("");
     setBusy(true);
     try {
@@ -309,6 +358,7 @@ function Editor({
     } catch (e) {
       setError(e instanceof Error ? e.message : "Kayıt işlemi tamamlanamadı.");
     } finally {
+      saving.current = false;
       setBusy(false);
     }
   };
@@ -363,6 +413,8 @@ function Editor({
           installments: number("installments"),
           limit: amount("limit"),
           statement: amount("statement"),
+          statementDate:
+            kind === "card" ? str("statementDate") || undefined : undefined,
           cutDay: number("cutDay"),
           dueDay: number("dueDay"),
           rate: number("rate"),
@@ -381,7 +433,7 @@ function Editor({
   return (
     <div className="overlay" onClick={close}>
       <section
-        className="sheet"
+        className={"sheet" + (masked ? " private-editor" : "")}
         role="dialog"
         aria-modal="true"
         aria-label={labels[kind]}
@@ -393,7 +445,21 @@ function Editor({
             <X size={20} />
           </button>
         </div>
-        <form onSubmit={submit}>
+        <form
+          onSubmit={submit}
+          onInvalid={(event) => {
+            const input = event.target as HTMLInputElement;
+            input.setCustomValidity(
+              input.validity.valueMissing
+                ? "Bu alanı doldurun."
+                : "Bu alana geçerli bir değer girin.",
+            );
+            setError(input.validationMessage);
+          }}
+          onInput={(event) =>
+            (event.target as HTMLInputElement).setCustomValidity?.("")
+          }
+        >
           <div className="fields">
             {field(
               "name",
@@ -511,8 +577,18 @@ function Editor({
                 ["Alım", "Alım"],
                 ["Satım", "Satım"],
               ])}
-            {kind === "trade" &&
-              field("units", "Adet", entry.units, "text", true)}
+            {kind === "trade" && (
+              <>
+                {field("units", "Adet", entry.units, "text", true)}
+                {select(
+                  "source",
+                  "Bağlı banka hesabı",
+                  entry.source,
+                  bank,
+                  "Hesaba yansıtma",
+                )}
+              </>
+            )}
             {kind === "income" && (
               <>
                 {select(
@@ -574,6 +650,12 @@ function Editor({
                   true,
                 )}
                 {field("statement", "Ekstre borcu (₺)", tl(entry.statement))}
+                {field(
+                  "statementDate",
+                  "Son ekstre kesim tarihi",
+                  entry.statementDate,
+                  "date",
+                )}
                 {field("cutDay", "Hesap kesim günü", entry.cutDay)}
                 {field("dueDay", "Son ödeme günü", entry.dueDay)}
               </>
@@ -731,13 +813,34 @@ function App() {
   const [dark, setDark] = useState(
     () => localStorage.getItem("finans360-theme") !== "light",
   );
-  const [visible, setVisible] = useState(true);
+  const [visible, setVisible] = useState(
+    () => localStorage.getItem("finans360-hide") !== "true",
+  );
+  const [tooltipAllowed, setTooltipAllowed] = useState(true);
+  useEffect(() => {
+    const outside = (event: PointerEvent) => {
+      if (!(event.target as Element)?.closest?.(".chart"))
+        setTooltipAllowed(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setTooltipAllowed(false);
+    };
+    document.addEventListener("pointerdown", outside);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("keydown", escape);
+    };
+  }, []);
+
   const [error, setError] = useState("");
   const [entry, setEntry] = useState<Entry>();
   const [chooser, setChooser] = useState(false);
   const [filter, setFilter] = useState("");
   const [category, setCategory] = useState("");
   const [from, setFrom] = useState(start);
+  const [txnMonth, setTxnMonth] = useState(start);
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [to, setTo] = useState(end);
   const [period, setPeriod] = useState(6);
   const [paymentFilter, setPaymentFilter] = useState("");
@@ -765,6 +868,86 @@ function App() {
   const [locked, setLocked] = useState(Boolean(pin));
   const [pinInput, setPinInput] = useState("");
   const [lockError, setLockError] = useState("");
+  const [unlockBusy, setUnlockBusy] = useState(false);
+  const unlockGuard = useRef(false);
+  const [minutes, setMinutes] = useState(() =>
+    [1, 3, 5, 10].includes(
+      Number(localStorage.getItem("finans360-lock-minutes")),
+    )
+      ? Number(localStorage.getItem("finans360-lock-minutes"))
+      : 3,
+  );
+  const [backupStatus, setBackupStatus] = useState("");
+  const [versionStatus, setVersionStatus] = useState("");
+  const registrationRef = useRef<ServiceWorkerRegistration>(undefined);
+  const checkVersion = () =>
+    run(async () => {
+      if (!navigator.onLine) {
+        setVersionStatus("İnternet bağlantısı yok.");
+        return;
+      }
+      if (!registrationRef.current) {
+        setVersionStatus("Güncelleme denetimi bu oturumda kullanılamıyor.");
+        return;
+      }
+      setVersionStatus("Yeni sürüm kontrol ediliyor…");
+      try {
+        const updated = await registrationRef.current.update();
+        const candidate = updated.installing;
+        if (
+          candidate &&
+          candidate.state !== "installed" &&
+          candidate.state !== "redundant"
+        )
+          await new Promise<void>((resolve) => {
+            const timeout = setTimeout(resolve, 8000);
+            const state = () => {
+              if (
+                candidate.state === "installed" ||
+                candidate.state === "redundant"
+              ) {
+                clearTimeout(timeout);
+                candidate.removeEventListener("statechange", state);
+                resolve();
+              }
+            };
+            candidate.addEventListener("statechange", state);
+            state();
+          });
+        if (updated.waiting) {
+          setWaiting(updated.waiting);
+          setVersionStatus("Yeni sürüm hazır.");
+        } else
+          setVersionStatus(
+            updated.installing
+              ? "Yeni sürüm indiriliyor…"
+              : "Yeni sürüm bulunamadı.",
+          );
+      } catch {
+        setVersionStatus(
+          "Güncelleme kontrol edilemedi. Bağlantıyı kontrol edin.",
+        );
+      }
+    });
+  const createBackup = async (password?: string) => {
+    const raw = JSON.stringify({ version: 1, mode, records: rows }, null, 2);
+    const data = password ? await protect(password, raw) : raw;
+    const time = new Date();
+    download(
+      "finans360-" +
+        mode +
+        (password ? "-sifreli" : "") +
+        "-" +
+        day(time) +
+        ".json",
+      new Blob([data], { type: "application/json" }),
+    );
+    setBackupStatus(
+      "İndirme isteği oluşturuldu · " +
+        time.toLocaleString("tr-TR") +
+        ". Dosyalar uygulamasından kontrol edin.",
+    );
+  };
   useEffect(() => {
     if (!import.meta.env.PROD || !("serviceWorker" in navigator)) return;
     let registration: ServiceWorkerRegistration | undefined;
@@ -779,6 +962,7 @@ function App() {
       .register(import.meta.env.BASE_URL + "sw.js")
       .then((reg) => {
         registration = reg;
+        registrationRef.current = reg;
         if (reg.waiting && navigator.serviceWorker.controller)
           setWaiting(reg.waiting);
         reg.addEventListener("updatefound", observe);
@@ -803,7 +987,7 @@ function App() {
     };
     const reset = () => {
       clearTimeout(timer);
-      timer = setTimeout(lock, 180000);
+      timer = setTimeout(lock, minutes * 60000);
     };
     const hide = () => {
       if (document.hidden) lock();
@@ -818,7 +1002,7 @@ function App() {
       window.removeEventListener("pointerdown", reset);
       window.removeEventListener("keydown", reset);
     };
-  }, [pin, locked]);
+  }, [pin, locked, minutes]);
   const initial = mode === "demo" ? sample : [];
   useEffect(() => {
     let active = true;
@@ -863,10 +1047,12 @@ function App() {
   }, [dark]);
   const mutate = async (change: (data: Data) => Data) =>
     setRows(await update(mode, initial, (rows) => validateData(change(rows))));
-  const run = (action: () => Promise<unknown>) =>
+  const run = (action: () => Promise<unknown>) => {
+    setError("");
     void action().catch((e) =>
       setError(e instanceof Error ? e.message : "İşlem tamamlanamadı."),
     );
+  };
   const newEntry = (kind: Kind, defaults: Partial<Entry> = {}) => {
     setChooser(false);
     setOccurrence(undefined);
@@ -882,10 +1068,10 @@ function App() {
   const navigate = (next: Tab) => {
     setTab(next);
     setError("");
-    window.scrollTo(0, 0);
+    document.querySelector(".shell > main")?.scrollTo(0, 0);
   };
   const fmt = (amount: number) => (visible ? money(amount) : "••••");
-  const summary = snapshot(rows, today);
+  const summary = useMemo(() => snapshot(rows, today), [rows, today]);
   const selectedMonthEnd = monthEnd(viewMonth);
   const monthly = totals(
     rows,
@@ -898,18 +1084,17 @@ function App() {
     (e) => e.kind === "expense" && statusOf(e, today) === "paid",
   );
   const fixedSpent = sum(monthlyExpenses.filter(isFixed), (e) => e.amount);
-  const salary = availableUntilSalary(rows, today, salaryDay);
-  const current = balances(rows, today);
+  const salary = useMemo(
+    () => availableUntilSalary(rows, today, salaryDay),
+    [rows, today, salaryDay],
+  );
+  const current = useMemo(() => balances(rows, today), [rows, today]);
   const deposits = sum(
     current.filter((e) => e.kind === "deposit"),
     (e) => e.balance,
   );
   const investments = sum(
     current.filter((e) => e.kind === "investment"),
-    (e) => e.balance,
-  );
-  const cashOnHand = sum(
-    current.filter((e) => e.kind === "account" && e.icon === "cash"),
     (e) => e.balance,
   );
   const forecast = snapshot(
@@ -971,55 +1156,81 @@ function App() {
         })
       : "••••";
   const chartStart = chartEnd.slice(0, 7) + "-01";
-  const series = Array.from({ length: period }, (_, i) => {
-    const date = month(chartStart, i - period + 1),
-      last = i === period - 1 ? chartEnd : addDays(month(date, 1), -1),
-      t = totals(rows, date, last);
-    const history = snapshot(rows, last);
-    const hasFlows = scheduled(rows, last, date).some(completed);
-    const availableHistory =
-      rows.some(
-        (e) =>
-          (e.balanceFrom ?? e.date) <= last &&
-          ["account", "card", "deposit"].includes(e.kind),
-      ) ||
-      rows.some(
-        (e) =>
-          e.kind === "investment" &&
-          e.date <= last &&
-          investmentAt(rows, e, last) !== undefined,
-      );
-    const positions = rows
-      .filter((e) => e.kind === "investment" && e.date <= last)
-      .map((e) => investmentAt(rows, e, last));
-    const completeValuations = positions.every((value) => value !== undefined);
-    return {
-      name: monthLabel(date),
-      Gelir: hasFlows ? t.income : null,
-      Gider: hasFlows ? t.expense : null,
-      Birikim: availableHistory && completeValuations ? history.assets : null,
-      Varlık: availableHistory && completeValuations ? history.net : null,
-      Borç: rows.some((e) => e.kind === "card" && e.date <= last)
-        ? history.debt
-        : null,
-      Yatırım:
-        positions.length && completeValuations
-          ? sum(positions, (v) => v ?? 0)
-          : null,
-    };
-  });
-  const projection = Array.from({ length: 12 }, (_, i) => {
-    const date = month(start, i + 1);
-    return {
-      name: monthLabel(date),
-      Birikim: snapshot(rows, monthEnd(date), true, today).net,
-      Gelir: null,
-      Gider: null,
-      Varlık: null,
-      Borç: null,
-      Yatırım: null,
-    };
-  });
+  const series = useMemo(
+    () =>
+      tab === "Özet" || tab === "Raporlar"
+        ? Array.from({ length: period }, (_, i) => {
+            const date = month(chartStart, i - period + 1),
+              last = i === period - 1 ? chartEnd : addDays(month(date, 1), -1),
+              t = totals(rows, date, last);
+            const history = snapshot(rows, last);
+            const hasFlows = scheduled(rows, last, date).some(completed);
+            const availableHistory =
+              rows.some(
+                (e) =>
+                  (e.balanceFrom ?? e.date) <= last &&
+                  ["account", "card", "deposit"].includes(e.kind),
+              ) ||
+              rows.some(
+                (e) =>
+                  e.kind === "investment" &&
+                  e.date <= last &&
+                  investmentAt(rows, e, last) !== undefined,
+              );
+            const positions = rows
+              .filter((e) => e.kind === "investment" && e.date <= last)
+              .map((e) => investmentAt(rows, e, last));
+            const completeValuations = positions.every(
+              (value) => value !== undefined,
+            );
+            return {
+              name: monthLabel(date),
+              Gelir: hasFlows ? t.income : null,
+              Gider: hasFlows ? t.expense : null,
+              Birikim:
+                availableHistory && completeValuations ? history.assets : null,
+              Varlık:
+                availableHistory && completeValuations ? history.net : null,
+              Borç: rows.some((e) => e.kind === "card" && e.date <= last)
+                ? history.debt
+                : null,
+              Yatırım:
+                positions.length && completeValuations
+                  ? sum(positions, (v) => v ?? 0)
+                  : null,
+            };
+          })
+        : [],
+    [rows, period, chartStart, chartEnd, tab],
+  );
+  const projection = useMemo(
+    () =>
+      tab === "Raporlar"
+        ? Array.from({ length: 12 }, (_, i) => {
+            const date = month(start, i + 1);
+            const plans = scheduled(rows, monthEnd(date), date);
+            return {
+              name: monthLabel(date),
+              date,
+              plannedIncome: sum(
+                plans.filter((e) => e.kind === "income"),
+                (e) => e.amount,
+              ),
+              plannedExpense: sum(
+                plans.filter((e) => e.kind === "expense"),
+                (e) => e.amount,
+              ),
+              Birikim: snapshot(rows, monthEnd(date), true, today).net,
+              Gelir: null,
+              Gider: null,
+              Varlık: null,
+              Borç: null,
+              Yatırım: null,
+            };
+          })
+        : [],
+    [rows, start, today, tab],
+  );
   const upcoming = (first: string, last: string) =>
     [
       ...scheduled(rows, last, first).filter(
@@ -1055,13 +1266,22 @@ function App() {
     pending: "Bekliyor",
     late: "Gecikmiş",
   };
+  const txnEnd = monthEnd(txnMonth);
+  const txnTotals = totals(rows, txnMonth, txnEnd < today ? txnEnd : today);
+  const filterCount = [
+    filter,
+    category,
+    accountFilter,
+    stateFilter,
+    fixedFilter,
+  ].filter(Boolean).length;
   const transactions = [
-    ...scheduled(rows, rangeEnd, from),
+    ...scheduled(rows, txnEnd, txnMonth),
     ...rows.filter(
       (e) =>
         ["adjustment", "trade", "valuation"].includes(e.kind) &&
-        e.date >= from &&
-        e.date <= rangeEnd,
+        e.date >= txnMonth &&
+        e.date <= txnEnd,
     ),
   ]
     .filter(
@@ -1083,7 +1303,7 @@ function App() {
       (a, b) =>
         b.date.localeCompare(a.date) || (b.createdAt ?? 0) - (a.createdAt ?? 0),
     );
-  const row = (e: Entry, showStatus = false) => (
+  const row = (e: Entry, showStatus = false, grouped = false) => (
     <div className="entry-wrap" key={e.id + "-" + e.date + "-" + e.name}>
       <button
         className="entry-row"
@@ -1105,7 +1325,8 @@ function App() {
         <span className="row-text">
           <strong>{e.name}</strong>
           <small>
-            {e.category || labels[e.kind]} · {dateLabel(e.date)}
+            {e.category || labels[e.kind]}
+            {!grouped && " · " + dateLabel(e.date)}
             {showStatus && isFlow(e) && (
               <>
                 {" "}
@@ -1119,7 +1340,7 @@ function App() {
         </span>
         {(isFlow(e) ||
           ["adjustment", "trade", "valuation"].includes(e.kind)) && (
-          <strong
+          <Amount
             className={
               e.kind === "income"
                 ? "positive"
@@ -1130,11 +1351,12 @@ function App() {
           >
             {e.kind === "income" ? "+" : e.kind === "expense" ? "−" : ""}
             {fmt(e.amount)}
-          </strong>
+          </Amount>
         )}
         <ChevronRight className="muted chevron" size={16} />
       </button>
       {showStatus &&
+        !grouped &&
         e.date <= today &&
         (e.kind === "expense" || e.kind === "income" || e.kind === "payment") &&
         !(e.installments && e.installments > 1) && (
@@ -1193,14 +1415,15 @@ function App() {
         <span>{name}</span>
         <strong
           className={
-            value < 0 || /gider|borç|açığı/i.test(name)
+            value < 0 ||
+            (!/eksi gider/i.test(name) && /gider|bor[çc]|açığı/i.test(name))
               ? "negative"
-              : /gelir/i.test(name)
+              : /gelir|kâr/i.test(name)
                 ? "positive"
                 : undefined
           }
         >
-          {fmt(value)}
+          <Amount>{fmt(value)}</Amount>
         </strong>
       </div>
     ));
@@ -1248,6 +1471,10 @@ function App() {
         )) ? (
       <div
         className="chart"
+        onPointerDown={() => setTooltipAllowed(true)}
+        onPointerMove={(e) => {
+          if (e.pointerType === "mouse") setTooltipAllowed(true);
+        }}
         aria-label={
           type === "flow" ? "Aylık gelir ve gider" : "Birikim geçmişi"
         }
@@ -1270,18 +1497,13 @@ function App() {
                 stroke="var(--muted)"
               />
               <YAxis
-                width={57}
-                tickFormatter={(v) =>
-                  new Intl.NumberFormat("tr-TR", {
-                    notation: "compact",
-                    style: "currency",
-                    currency: "TRY",
-                    maximumFractionDigits: 1,
-                  }).format(v / 100)
-                }
+                width={75}
+                tickFormatter={axisAmount}
                 tick={{ fontSize: 11, fill: "var(--muted)" }}
               />
               <Tooltip
+                active={tooltipAllowed ? undefined : false}
+                cursor={{ fill: "var(--soft)", opacity: 0.55 }}
                 formatter={(v) => money(Number(v))}
                 contentStyle={{
                   background: "var(--panel)",
@@ -1306,18 +1528,13 @@ function App() {
             <AreaChart data={type === "projection" ? projection : series}>
               <XAxis dataKey="name" stroke="var(--muted)" />
               <YAxis
-                width={57}
-                tickFormatter={(v) =>
-                  new Intl.NumberFormat("tr-TR", {
-                    notation: "compact",
-                    style: "currency",
-                    currency: "TRY",
-                    maximumFractionDigits: 1,
-                  }).format(v / 100)
-                }
+                width={75}
+                tickFormatter={axisAmount}
                 tick={{ fontSize: 11, fill: "var(--muted)" }}
               />
               <Tooltip
+                active={tooltipAllowed ? undefined : false}
+                cursor={{ fill: "var(--soft)", opacity: 0.55 }}
                 formatter={(v) => money(Number(v))}
                 contentStyle={{
                   background: "var(--panel)",
@@ -1338,7 +1555,9 @@ function App() {
                 }
                 stroke="#55d39d"
                 fill="#55d39d"
-                fillOpacity={0.2}
+                fillOpacity={type === "projection" ? 0.08 : 0.2}
+                strokeDasharray={type === "projection" ? "5 4" : undefined}
+                dot={{ r: 2.5 }}
               />
             </AreaChart>
           )}
@@ -1347,62 +1566,93 @@ function App() {
     ) : (
       <p className="empty">{visible ? "Veri yok." : "Tutarlar gizli."}</p>
     );
-  const pie = (data: { name: string; value: number }[]) =>
-    visible && data.some((e) => e.value > 0) ? (
-      <div className="chart">
-        <ResponsiveContainer width="100%" height="100%">
-          <PieChart>
-            <text
-              x="50%"
-              y="46%"
-              textAnchor="middle"
-              fill="var(--text)"
-              fontSize="14"
-            >
-              {fmt(sum(data, (e) => e.value))}
-            </text>
-            <Pie
-              data={data}
-              dataKey="value"
-              nameKey="name"
-              cy="46%"
-              label={({ percent }) =>
-                percent === undefined
-                  ? ""
-                  : (percent * 100).toLocaleString("tr-TR", {
-                      maximumFractionDigits: 0,
-                    }) + "%"
-              }
-              innerRadius="42%"
-              outerRadius="67%"
-            >
-              {data.map((e, i) => (
-                <Cell key={e.name + i} fill={colors[i % colors.length]} />
-              ))}
-            </Pie>
-            <Tooltip
-              formatter={(v) => money(Number(v))}
-              contentStyle={{
-                background: "var(--panel)",
-                color: "var(--text)",
-                border: "1px solid var(--line)",
-              }}
-              itemStyle={{ color: "var(--text)" }}
-            />
-            <Legend />
-          </PieChart>
-        </ResponsiveContainer>
-      </div>
-    ) : (
-      <p className="empty">
-        {visible ? "Grafik için yeterli veri yok." : "Tutarlar gizli."}
-      </p>
+  const pie = (data: { name: string; value: number; color?: string }[]) => {
+    const entries = data
+      .filter((e) => e.value > 0)
+      .map((e, i) => ({ ...e, color: e.color ?? colors[i % colors.length] }));
+    const total = sum(entries, (e) => e.value);
+    if (!visible || !total)
+      return (
+        <p className="empty">{visible ? "Veri yok." : "Tutarlar gizli."}</p>
+      );
+    return (
+      <>
+        <div className="chart chart-pie">
+          <ResponsiveContainer width="100%" height="100%">
+            <PieChart>
+              <Pie
+                data={entries}
+                dataKey="value"
+                nameKey="name"
+                innerRadius="58%"
+                outerRadius="92%"
+                isAnimationActive={false}
+              >
+                {entries.map((e) => (
+                  <Cell key={e.name} fill={e.color} stroke="var(--panel)" />
+                ))}
+              </Pie>
+            </PieChart>
+          </ResponsiveContainer>
+        </div>
+        <Amount className="chart-summary">{fmt(total)}</Amount>
+        <ul className="chart-list">
+          {entries.map((e) => (
+            <li key={e.name}>
+              <span>
+                <i style={{ color: e.color }} />
+                {e.name}
+              </span>
+              <Amount>{fmt(e.value)}</Amount>
+              <small>{pct(e.value / total)}</small>
+            </li>
+          ))}
+        </ul>
+      </>
     );
+  };
+  const paymentDetails = (
+    title: string,
+    items: { id: string; name: string; date: string; amount: number }[],
+    note: string,
+  ) => (
+    <details className="obligations">
+      <summary>
+        {title} · {fmt(sum(items, (e) => e.amount))}
+      </summary>
+      <p>{note}</p>
+      {items.length ? (
+        items.map((e) => (
+          <div className="obligation-line" key={e.id + e.date}>
+            <span>
+              {e.name}
+              <br />
+              <small>
+                {dateLabel(e.date)}
+                {e.date < today
+                  ? " · Gecikmiş"
+                  : e.date === today
+                    ? " · Bugün"
+                    : ""}
+              </small>
+            </span>
+            <Amount>{fmt(e.amount)}</Amount>
+          </div>
+        ))
+      ) : (
+        <p className="empty">Bu aralıkta ödeme yok.</p>
+      )}
+    </details>
+  );
   const budgets = rows.filter((e) => e.kind === "budget");
   const warnings = budgets.map((e) => ({
     e,
     spent: sum(
-      scheduled(rows, end, start).filter(
+      scheduled(
+        rows,
+        tab === "İşlemler" ? (txnEnd < today ? txnEnd : today) : today,
+        tab === "İşlemler" ? txnMonth : start,
+      ).filter(
         (x) => x.kind === "expense" && completed(x) && x.category === e.name,
       ),
       (x) => x.amount,
@@ -1422,37 +1672,17 @@ function App() {
   const calendarEnd = monthEnd(calendarStart);
   const firstWeekday = (new Date(calendarStart + "T12:00:00").getDay() + 6) % 7;
   const events = upcoming(calendarStart, calendarEnd);
-  const unfulfilled = (first: string, last: string) =>
-    upcoming(first, last).filter(
-      (e) => e.kind === "expense" && statusOf(e, today) !== "paid",
-    );
-  const upcomingPay = (days: number) => {
-    const until = addDays(today, days - 1);
-    const openBills = unfulfilled(today, until).filter(
-      (e) => rows.find((a) => a.id === e.source)?.kind !== "card",
-    );
-    return (
-      sum(openBills, (e) => e.amount) +
-      sum(
-        cardObligations(rows, today, until).filter((e) => e.date >= today),
-        (e) => e.amount,
-      )
-    );
-  };
-  const overduePay =
-    sum(
-      scheduled(rows, today).filter(
-        (e) =>
-          e.kind === "expense" &&
-          statusOf(e, today) === "late" &&
-          rows.find((a) => a.id === e.source)?.kind !== "card",
-      ),
-      (e) => e.amount,
-    ) +
-    sum(
-      cardObligations(rows, today, today).filter((e) => e.date < today),
-      (e) => e.amount,
-    );
+  const windowItems = (days: number) =>
+    paymentItems(rows, today, addDays(today, days - 1), today);
+  const lateItems = paymentItems(rows, today, addDays(today, -1));
+  const calendarStatus = (e: Entry) =>
+    e.kind === "card"
+      ? "card"
+      : e.kind === "income"
+        ? "income"
+        : isFlow(e)
+          ? statusOf(e, today)
+          : "event";
   const reportExcel = () =>
     run(async () => {
       const { default: ExcelJS } = await import("exceljs");
@@ -1493,14 +1723,20 @@ function App() {
           className="panel"
           onSubmit={(e) => {
             e.preventDefault();
-            void reveal(pinInput, pin)
-              .then((value) => {
-                if (value !== "Finans360") throw new Error();
+            if (unlockGuard.current) return;
+            unlockGuard.current = true;
+            setUnlockBusy(true);
+            setLockError("");
+            void verifyPin(pinInput, pin)
+              .then(() => {
                 setLocked(false);
                 setPinInput("");
-                setLockError("");
               })
-              .catch(() => setLockError("PIN yanlış."));
+              .catch((e) => setLockError(e.message))
+              .finally(() => {
+                unlockGuard.current = false;
+                setUnlockBusy(false);
+              });
           }}
         >
           <h1>Finans360 kilitli</h1>
@@ -1515,7 +1751,9 @@ function App() {
               required
             />
           </label>
-          <button className="primary">Kilidi aç</button>
+          <button className="primary" disabled={unlockBusy}>
+            Kilidi aç
+          </button>
           {lockError && <p className="error">{lockError}</p>}
         </form>
       </main>
@@ -1540,7 +1778,10 @@ function App() {
           <button
             className="icon"
             aria-label={visible ? "Tutarları gizle" : "Tutarları göster"}
-            onClick={() => setVisible(!visible)}
+            onClick={() => {
+              localStorage.setItem("finans360-hide", String(visible));
+              setVisible(!visible);
+            }}
           >
             {visible ? <Eye size={19} /> : <EyeOff size={19} />}
           </button>
@@ -1614,7 +1855,9 @@ function App() {
                 </span>
                 <small>Güncel bakiyeler</small>
               </div>
-              <div className="net">{fmt(summary.net)}</div>
+              <div className="net">
+                <Amount>{fmt(summary.net)}</Amount>
+              </div>
               <div className="hero-stats">
                 {stats([
                   ["Kullanılabilir nakit", summary.cash],
@@ -1635,53 +1878,54 @@ function App() {
             <section className="panel">
               <h2>Aylık bütçe</h2>
               <MonthPicker value={viewMonth} onChange={changeMonth} />
-            </section>
-            <div className="metrics">
-              {stats([
-                ["Gerçekleşen gelir", monthly.income],
-                ["Gerçekleşen gider", monthly.expense],
-                [
-                  "Beklenen gelir",
-                  sum(
-                    pending.filter((e) => e.kind === "income"),
-                    (e) => e.amount,
-                  ),
-                ],
-                [
-                  "Beklenen gider",
-                  sum(
-                    pending.filter((e) => e.kind === "expense"),
-                    (e) => e.amount,
-                  ),
-                ],
-                [
-                  "Kalan faturalar",
-                  sum(
-                    pending.filter((e) => e.kind === "expense" && isFixed(e)),
-                    (e) => e.amount,
-                  ),
-                ],
-                ["Sabit gider", fixedSpent],
-                ["Değişken gider", monthly.expense - fixedSpent],
-                [
-                  selectedMonthEnd < today
-                    ? "Ay sonu nakit"
-                    : "Ay sonu tahmini nakit",
-                  forecast,
-                ],
-              ])}
-              <div className="stat">
-                <span>Tasarruf oranı</span>
-                <strong>
-                  {visible
-                    ? "%" +
-                      monthly.rate.toLocaleString("tr-TR", {
-                        maximumFractionDigits: 1,
-                      })
-                    : "••••"}
-                </strong>
+              <div className="budget-lines">
+                {stats([
+                  ["Gerçekleşen gelir", monthly.income],
+                  ["Gerçekleşen gider", monthly.expense],
+                  [
+                    "Beklenen gelir",
+                    sum(
+                      pending.filter((e) => e.kind === "income"),
+                      (e) => e.amount,
+                    ),
+                  ],
+                  [
+                    "Beklenen gider",
+                    sum(
+                      pending.filter((e) => e.kind === "expense"),
+                      (e) => e.amount,
+                    ),
+                  ],
+                  [
+                    "Kalan faturalar",
+                    sum(
+                      pending.filter((e) => e.kind === "expense" && isFixed(e)),
+                      (e) => e.amount,
+                    ),
+                  ],
+                  ["Gelir eksi gider", monthly.income - monthly.expense],
+                  ["Sabit gider", fixedSpent],
+                  ["Değişken gider", monthly.expense - fixedSpent],
+                  [
+                    selectedMonthEnd < today
+                      ? "Ay sonu nakit"
+                      : "Ay sonu tahmini nakit",
+                    forecast,
+                  ],
+                ])}
+                <div className="stat">
+                  <span>Tasarruf oranı</span>
+                  <strong>
+                    {visible
+                      ? "%" +
+                        monthly.rate.toLocaleString("tr-TR", {
+                          maximumFractionDigits: 1,
+                        })
+                      : "••••"}
+                  </strong>
+                </div>
               </div>
-            </div>
+            </section>
             {panel(
               "Maaşa kadar",
               <>
@@ -1693,9 +1937,8 @@ function App() {
                       ) + " gün kaldı"}{" "}
                   · {dateLabel(salary.salary)}
                 </p>
-                <div className="metrics">
+                <div className="compact-stats">
                   {stats([
-                    ["Borç ve faturalar", salary.required],
                     [
                       salary.remaining < 0 ? "Nakit açığı" : "Kalan nakit",
                       salary.remaining,
@@ -1703,6 +1946,11 @@ function App() {
                     ["Günlük bütçe", salary.daily],
                   ])}
                 </div>
+                {paymentDetails(
+                  "Borç ve faturalar",
+                  paymentItems(rows, today, salary.salary),
+                  "Gecikmiş ve maaş gününe kadar vadesi gelen ödemeler, maaş günü dahil. Kart harcamaları ekstreyle birlikte tekrar sayılmaz. Günlük tutar, kalan nakdin en az bir güne bölünüp aşağı kuruşa yuvarlanmasıdır.",
+                )}
               </>,
             )}
             <div className="grid">
@@ -1717,10 +1965,15 @@ function App() {
                 </>,
               )}
               {panel(
-                "Yaklaşan ödemeler",
+                "Yaklaşan ödemeler ve gelirler",
                 list(
                   upcoming(today, addDays(today, 30))
-                    .filter((e) => e.kind !== "expense" || !completed(e))
+                    .filter((e) => !isFlow(e) || statusOf(e, today) !== "paid")
+                    .map((e) =>
+                      e.kind === "income"
+                        ? { ...e, name: "Beklenen gelir · " + e.name }
+                        : e,
+                    )
                     .slice(0, 5),
                   "Önümüzdeki 30 gün için kayıt yok.",
                   true,
@@ -1749,111 +2002,143 @@ function App() {
             {panel(
               "İşlem geçmişi",
               <>
-                {range}
-                <div className="range">
-                  <label>
-                    İşlem türü
-                    <select
-                      value={filter}
-                      onChange={(e) => setFilter(e.target.value)}
-                    >
-                      <option value="">Tümü</option>
-                      {(
-                        [
-                          "income",
-                          "expense",
-                          "transfer",
-                          "payment",
-                          "adjustment",
-                          "trade",
-                          "valuation",
-                        ] as const
-                      ).map((k) => (
-                        <option value={k} key={k}>
-                          {labels[k]}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    Kategori
-                    <select
-                      value={category}
-                      onChange={(e) => setCategory(e.target.value)}
-                    >
-                      <option value="">Tümü</option>
-                      {[
-                        ...new Set([
-                          ...incomeCategories,
-                          ...categories,
-                          ...budgets.map((e) => e.name),
-                        ]),
-                      ].map((v) => (
-                        <option key={v}>{v}</option>
-                      ))}
-                    </select>
-                  </label>
+                <MonthPicker value={txnMonth} onChange={setTxnMonth} />
+                <div className="compact-stats">
+                  {stats([
+                    ["Gerçekleşen gelir", txnTotals.income],
+                    ["Gerçekleşen gider", txnTotals.expense],
+                  ])}
                 </div>
-                <div className="range">
-                  <label>
-                    İşlem ara
-                    <input
-                      type="search"
-                      value={search}
-                      onChange={(e) => setSearch(e.target.value)}
-                    />
-                  </label>
-                  <label>
-                    Ödeme hesabı
-                    <select
-                      value={accountFilter}
-                      onChange={(e) => setAccountFilter(e.target.value)}
+                <label className="transaction-search">
+                  İşlem ara
+                  <input
+                    type="search"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                  />
+                </label>
+                <details
+                  className="filter-panel"
+                  open={filtersOpen}
+                  onToggle={(e) => setFiltersOpen(e.currentTarget.open)}
+                >
+                  <summary>
+                    Filtreler
+                    {filterCount > 0
+                      ? " (" + filterCount.toLocaleString("tr-TR") + ")"
+                      : ""}
+                  </summary>
+                  {filterCount > 0 && (
+                    <button
+                      className="link"
+                      onClick={() => {
+                        setFilter("");
+                        setCategory("");
+                        setAccountFilter("");
+                        setStateFilter("");
+                        setFixedFilter("");
+                      }}
                     >
-                      <option value="">Tümü</option>
-                      {rows
-                        .filter((e) =>
-                          ["account", "card", "deposit"].includes(e.kind),
-                        )
-                        .map((e) => (
-                          <option key={e.id} value={e.id}>
-                            {e.name}
+                      Filtreleri temizle
+                    </button>
+                  )}
+                  <div className="range">
+                    <label>
+                      İşlem türü
+                      <select
+                        value={filter}
+                        onChange={(e) => setFilter(e.target.value)}
+                      >
+                        <option value="">Tümü</option>
+                        {(
+                          [
+                            "income",
+                            "expense",
+                            "transfer",
+                            "payment",
+                            "adjustment",
+                            "trade",
+                            "valuation",
+                          ] as const
+                        ).map((k) => (
+                          <option value={k} key={k}>
+                            {labels[k]}
                           </option>
                         ))}
-                    </select>
-                  </label>
-                  <label>
-                    Durum
-                    <select
-                      value={stateFilter}
-                      onChange={(e) => setStateFilter(e.target.value)}
-                    >
-                      <option value="">Tümü</option>
-                      {Object.entries(stateLabels).map(([key, value]) => (
-                        <option value={key} key={key}>
-                          {value}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    Gider sınıfı
-                    <select
-                      value={fixedFilter}
-                      onChange={(e) => setFixedFilter(e.target.value)}
-                    >
-                      <option value="">Tümü</option>
-                      <option value="fixed">Sabit</option>
-                      <option value="variable">Değişken</option>
-                    </select>
-                  </label>
-                </div>
+                      </select>
+                    </label>
+                    <label>
+                      Kategori
+                      <select
+                        value={category}
+                        onChange={(e) => setCategory(e.target.value)}
+                      >
+                        <option value="">Tümü</option>
+                        {[
+                          ...new Set([
+                            ...incomeCategories,
+                            ...categories,
+                            ...budgets.map((e) => e.name),
+                          ]),
+                        ].map((v) => (
+                          <option key={v}>{v}</option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                  <div className="range">
+                    <label>
+                      Ödeme hesabı
+                      <select
+                        value={accountFilter}
+                        onChange={(e) => setAccountFilter(e.target.value)}
+                      >
+                        <option value="">Tümü</option>
+                        {rows
+                          .filter((e) =>
+                            ["account", "card", "deposit"].includes(e.kind),
+                          )
+                          .map((e) => (
+                            <option key={e.id} value={e.id}>
+                              {e.name}
+                            </option>
+                          ))}
+                      </select>
+                    </label>
+                    <label>
+                      Durum
+                      <select
+                        value={stateFilter}
+                        onChange={(e) => setStateFilter(e.target.value)}
+                      >
+                        <option value="">Tümü</option>
+                        {Object.entries(stateLabels).map(([key, value]) => (
+                          <option value={key} key={key}>
+                            {value}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Gider sınıfı
+                      <select
+                        value={fixedFilter}
+                        onChange={(e) => setFixedFilter(e.target.value)}
+                      >
+                        <option value="">Tümü</option>
+                        <option value="fixed">Sabit</option>
+                        <option value="variable">Değişken</option>
+                      </select>
+                    </label>
+                  </div>
+                </details>
                 {transactions.length ? (
                   [...new Set(transactions.map((e) => e.date))].map((date) => (
                     <section className="day-group" key={date}>
                       <h3>{dateLabel(date)}</h3>
                       {transactions
                         .filter((e) => e.date === date)
-                        .map((e) => row(e, true))}
+                        .map((e) => row(e, true, true))}
                     </section>
                   ))
                 ) : (
@@ -1867,36 +2152,50 @@ function App() {
                 {warnings.length ? (
                   warnings.map(({ e, spent }) => (
                     <button
-                      className="entry-row"
+                      className="budget-item"
                       key={e.id}
                       onClick={() => open(e)}
                     >
-                      <span className="row-text">
-                        <strong>{e.name}</strong>
-                        <small>
-                          {e.amount
-                            ? "Harcanan " +
-                              fmt(spent) +
-                              " · Kalan " +
-                              fmt(e.amount - spent) +
-                              " · Limit " +
-                              fmt(e.amount)
-                            : "Limit belirlenmedi"}
-                        </small>
-                      </span>
-                      {visible && e.amount > 0 && (
-                        <progress
-                          aria-label="Bütçe kullanımı"
-                          max={e.amount}
-                          value={Math.min(spent, e.amount)}
-                        />
-                      )}
-                      {e.amount > 0 && spent >= e.amount * 0.8 && (
-                        <span className="error">
-                          {spent >= e.amount
-                            ? "Limit doldu"
-                            : "%80 eşiği geçildi"}
-                        </span>
+                      <strong>{e.name}</strong>
+                      {e.amount > 0 ? (
+                        <>
+                          <div className="compact-stats">
+                            {stats([
+                              ["Harcanan", spent],
+                              ["Toplam", e.amount],
+                              ["Kalan", e.amount - spent],
+                            ])}
+                          </div>
+                          {visible && (
+                            <>
+                              <Meter
+                                label="Bütçe kullanımı"
+                                value={spent}
+                                max={e.amount}
+                                tone={
+                                  spent >= e.amount
+                                    ? "negative"
+                                    : spent >= e.amount * 0.8
+                                      ? "warning"
+                                      : ""
+                                }
+                              />
+                              <small>{pct(spent / e.amount)} kullanıldı</small>
+                            </>
+                          )}
+                          {spent > e.amount ? (
+                            <p className="negative">
+                              Bütçe aşımı{" "}
+                              <Amount>{fmt(spent - e.amount)}</Amount>
+                            </p>
+                          ) : spent >= e.amount ? (
+                            <p className="negative">Limit doldu</p>
+                          ) : spent >= e.amount * 0.8 ? (
+                            <p className="status-pending">%80 eşiği geçildi</p>
+                          ) : null}
+                        </>
+                      ) : (
+                        <small> · Limit belirlenmedi</small>
                       )}
                     </button>
                   ))
@@ -1937,17 +2236,55 @@ function App() {
               panel(
                 "Varlık dağılımı",
                 <>
-                  {stats([
-                    ["Toplam varlık", summary.cash + summary.assets],
-                    ["Toplam borç", summary.debt],
-                    ["Net finansal varlık", summary.net],
-                  ])}
+                  <div className="compact-stats">
+                    {stats([
+                      ["Toplam varlık", summary.cash + summary.assets],
+                      ["Toplam borç", summary.debt],
+                      ["Net finansal varlık", summary.net],
+                    ])}
+                  </div>
+                  {current.some(
+                    (e) => e.kind === "account" && e.balance < 0,
+                  ) && (
+                    <p className="negative">
+                      Negatif hesap bakiyeleri{" "}
+                      <Amount>
+                        {fmt(
+                          sum(
+                            current.filter(
+                              (e) => e.kind === "account" && e.balance < 0,
+                            ),
+                            (e) => e.balance,
+                          ),
+                        )}
+                      </Amount>
+                    </p>
+                  )}
                   {pie([
                     {
                       name: "Bankalar",
-                      value: Math.max(0, summary.cash - cashOnHand),
+                      value: sum(
+                        current.filter(
+                          (e) =>
+                            e.kind === "account" &&
+                            e.icon !== "cash" &&
+                            e.balance > 0,
+                        ),
+                        (e) => e.balance,
+                      ),
                     },
-                    { name: "Nakit para", value: Math.max(0, cashOnHand) },
+                    {
+                      name: "Nakit para",
+                      value: sum(
+                        current.filter(
+                          (e) =>
+                            e.kind === "account" &&
+                            e.icon === "cash" &&
+                            e.balance > 0,
+                        ),
+                        (e) => e.balance,
+                      ),
+                    },
                     { name: "Mevduat", value: deposits },
                     { name: "Yatırım", value: investments },
                   ])}
@@ -1977,22 +2314,36 @@ function App() {
                   <InterestComparison fmt={fmt} visible={visible} />
                 </>,
               )}
-            <div className="metrics">
-              {stats([
-                ["Nakit", summary.cash],
-                ["Kart borcu", summary.debt],
-                ["Mevduat ve yatırım", summary.assets],
-              ])}
-            </div>
-            <div className="quick">
-              <button onClick={() => newEntry("transfer")}>
-                <Landmark size={19} /> Transfer
-              </button>
-              <button onClick={() => newEntry("payment")}>
-                <CreditCard size={19} /> Kart öde
-              </button>
-            </div>
-            <div className="grid">
+            {assetTab === "account" && (
+              <section className="panel">
+                <div className="compact-stats">
+                  {stats([["Kullanılabilir nakit", summary.cash]])}
+                </div>
+                <button className="link" onClick={() => newEntry("transfer")}>
+                  <Landmark size={16} /> Transfer
+                </button>
+              </section>
+            )}
+            {assetTab === "card" && (
+              <section className="panel">
+                <div className="compact-stats">
+                  {stats([
+                    ["Kart borcu", summary.debt],
+                    [
+                      "Toplam limit",
+                      sum(
+                        current.filter((e) => e.kind === "card"),
+                        (e) => e.limit ?? 0,
+                      ),
+                    ],
+                  ])}
+                </div>
+                <button className="link" onClick={() => newEntry("payment")}>
+                  <CreditCard size={16} /> Kart öde
+                </button>
+              </section>
+            )}
+            <div className="grid asset-grid">
               {(["account", "card", "deposit", "investment", "goal"] as const)
                 .filter((kind) => kind === assetTab)
                 .map((kind) => {
@@ -2028,7 +2379,7 @@ function App() {
                                     {e.name}
                                   </strong>
                                 </span>
-                                <strong>{fmt(e.balance)}</strong>
+                                <Amount>{fmt(e.balance)}</Amount>
                                 <ChevronRight size={16} />
                               </button>
                               {e.bank && <p>{e.bank}</p>}
@@ -2070,32 +2421,32 @@ function App() {
                                 </>
                               )}
                               {kind === "card" &&
-                                e.limit !== undefined &&
-                                e.limit > 0 &&
-                                visible && (
-                                  <p>
-                                    Limit kullanımı {pct(e.balance / e.limit)}
-                                  </p>
+                                visible &&
+                                Boolean(e.limit) && (
+                                  <>
+                                    <Meter
+                                      label="Limit kullanımı"
+                                      value={e.balance}
+                                      max={e.limit!}
+                                      tone={
+                                        e.balance >= e.limit!
+                                          ? "negative"
+                                          : e.balance >= e.limit! * 0.8
+                                            ? "warning"
+                                            : ""
+                                      }
+                                    />
+                                    <p>
+                                      Limit kullanımı{" "}
+                                      {pct(e.balance / e.limit!)}
+                                    </p>
+                                  </>
                                 )}
                               {kind === "card" && (
                                 <details>
                                   <summary>
                                     Kart geçmişi ve kalan taksitler
                                   </summary>
-                                  {e.dueDay && (
-                                    <p>
-                                      Son ödeme:{" "}
-                                      {dateLabel(
-                                        nextDayOfMonth(today, e.dueDay),
-                                      )}{" "}
-                                      ·{" "}
-                                      {daysBetween(
-                                        today,
-                                        nextDayOfMonth(today, e.dueDay),
-                                      )}{" "}
-                                      gün
-                                    </p>
-                                  )}
                                   <p>
                                     Kalan taksit:{" "}
                                     {
@@ -2110,6 +2461,45 @@ function App() {
                                       ).length
                                     }
                                   </p>
+                                  {(() => {
+                                    const remaining = scheduled(
+                                      rows,
+                                      month(today, 120),
+                                      addDays(today, 1),
+                                    ).filter(
+                                      (r) =>
+                                        r.source === e.id &&
+                                        (r.installments ?? 0) > 1,
+                                    );
+                                    const periods = [
+                                      ...new Set(
+                                        remaining.map((r) =>
+                                          r.date.slice(0, 7),
+                                        ),
+                                      ),
+                                    ].sort();
+                                    return periods.map((period) => (
+                                      <div
+                                        className="obligation-line"
+                                        key={period}
+                                      >
+                                        <span>
+                                          {monthLabel(period + "-01")}{" "}
+                                          {period.slice(0, 4)}
+                                        </span>
+                                        <Amount>
+                                          {fmt(
+                                            sum(
+                                              remaining.filter((r) =>
+                                                r.date.startsWith(period),
+                                              ),
+                                              (r) => r.amount,
+                                            ),
+                                          )}
+                                        </Amount>
+                                      </div>
+                                    ));
+                                  })()}
                                   {list(
                                     scheduled(rows, month(today, 120))
                                       .filter(
@@ -2190,16 +2580,61 @@ function App() {
                               )}
                               {kind === "card" && (
                                 <>
-                                  <p>
-                                    Toplam limit {fmt(e.limit ?? 0)} ·
-                                    Kullanılabilir limit{" "}
-                                    {fmt((e.limit ?? 0) - e.balance)} · Ekstre{" "}
-                                    {fmt(e.statement ?? 0)}
-                                  </p>
-                                  <p>
-                                    Kesim günü {e.cutDay ?? "—"} · Son ödeme
-                                    günü {e.dueDay ?? "—"}
-                                  </p>
+                                  <div className="compact-stats">
+                                    {stats([
+                                      ["Toplam limit", e.limit ?? 0],
+                                      [
+                                        "Kullanılabilir limit",
+                                        (e.limit ?? 0) - e.balance,
+                                      ],
+                                      ["Ekstre borcu", e.statement ?? 0],
+                                    ])}
+                                  </div>
+                                  {e.cutDay && (
+                                    <p>
+                                      Sonraki kesim{" "}
+                                      {dateLabel(
+                                        nextDayOfMonth(today, e.cutDay),
+                                      )}
+                                      {e.statementDate &&
+                                        " · Son ekstre " +
+                                          dateLabel(e.statementDate)}
+                                    </p>
+                                  )}
+                                  {e.dueDay &&
+                                    (() => {
+                                      const obligation = cardObligations(
+                                        rows,
+                                        today,
+                                        month(today, 2),
+                                      ).find((o) => o.id === e.id);
+                                      const next =
+                                        obligation?.date ??
+                                        nextDayOfMonth(today, e.dueDay);
+                                      const delta = daysBetween(today, next);
+                                      return (
+                                        <p
+                                          className={
+                                            obligation && delta < 0
+                                              ? "status-late"
+                                              : undefined
+                                          }
+                                        >
+                                          {obligation
+                                            ? "Son ödeme"
+                                            : "Sıradaki planlı ödeme tarihi"}{" "}
+                                          {dateLabel(next)}
+                                          {obligation &&
+                                            " · " +
+                                              Math.abs(delta).toLocaleString(
+                                                "tr-TR",
+                                              ) +
+                                              (delta < 0
+                                                ? " gün gecikmiş"
+                                                : " gün kaldı")}
+                                        </p>
+                                      );
+                                    })()}
                                   <button
                                     className="link"
                                     onClick={() =>
@@ -2248,6 +2683,40 @@ function App() {
                                       true,
                                     )}
                                   </details>
+                                  <div className="compact-stats">
+                                    {stats([
+                                      ["Anapara", e.amount],
+                                      ["Faiz işlemeyen", e.excluded ?? 0],
+                                      [
+                                        "Faiz işleyen",
+                                        e.amount - (e.excluded ?? 0),
+                                      ],
+                                      [
+                                        "Günlük tahmini net",
+                                        interest(e, 1).net,
+                                      ],
+                                      ...(e.days
+                                        ? [
+                                            [
+                                              "Vade sonu tahmini net",
+                                              interest(e, e.days).net,
+                                            ] as [string, number],
+                                          ]
+                                        : []),
+                                    ])}
+                                  </div>
+                                  <p>
+                                    Başlangıç {dateLabel(e.date)} · Yıllık faiz{" "}
+                                    {pct((e.rate ?? 0) / 100)} · Stopaj{" "}
+                                    {pct((e.tax ?? 0) / 100)}
+                                  </p>
+                                  {Boolean(e.days) && (
+                                    <p>
+                                      Günlük tutar, vadeli hesabın tahmini
+                                      günlük karşılığıdır. Tahsilat vade
+                                      koşullarına bağlıdır.
+                                    </p>
+                                  )}
                                   <p>
                                     Vade bitişi{" "}
                                     {(e.days ?? 0) > 0
@@ -2277,16 +2746,30 @@ function App() {
                                           ["Yıllık", 365],
                                           ...(e.days ? [["Vade", e.days]] : []),
                                         ] as [string, number][]
-                                      ).map(([name, days]) => {
-                                        const i = interest(e, days);
-                                        return (
-                                          <tr key={name}>
-                                            <td>{name}</td>
-                                            <td>{fmt(i.gross)}</td>
-                                            <td>{fmt(i.net)}</td>
-                                          </tr>
-                                        );
-                                      })}
+                                      )
+                                        .filter(
+                                          ([name, days], _, periods) =>
+                                            !name.includes("(özel)") ||
+                                            !periods.some(
+                                              ([other, d]) =>
+                                                !other.includes("(özel)") &&
+                                                d === days,
+                                            ),
+                                        )
+                                        .map(([name, days]) => {
+                                          const i = interest(e, days);
+                                          return (
+                                            <tr key={name}>
+                                              <td>{name}</td>
+                                              <td>
+                                                <Amount>{fmt(i.gross)}</Amount>
+                                              </td>
+                                              <td>
+                                                <Amount>{fmt(i.net)}</Amount>
+                                              </td>
+                                            </tr>
+                                          );
+                                        })}
                                     </tbody>
                                   </table>
                                   <p>
@@ -2330,37 +2813,45 @@ function App() {
                                       fmt(e.balance - basis(e))}
                                 </p>
                               )}
-                              {kind === "goal" && (
-                                <>
-                                  {visible && (
-                                    <progress
-                                      max={e.amount}
-                                      value={e.balance}
-                                    />
-                                  )}
-                                  <p>
-                                    {pct(e.balance / e.amount)} · Hedef{" "}
-                                    {fmt(e.amount)} · {dateLabel(e.date)}
-                                  </p>
-                                  <p>
-                                    Aylık gerekli birikim{" "}
-                                    {fmt(
-                                      Math.ceil(
-                                        (e.amount - e.balance) /
-                                          Math.max(
-                                            1,
+                              {kind === "goal" &&
+                                (() => {
+                                  const days = Math.max(
+                                      0,
+                                      daysBetween(today, e.date),
+                                    ),
+                                    periods = Math.max(1, Math.ceil(days / 30));
+                                  return (
+                                    <>
+                                      {visible && (
+                                        <Meter
+                                          label="Hedef ilerlemesi"
+                                          value={e.balance}
+                                          max={e.amount}
+                                        />
+                                      )}
+                                      <div className="compact-stats">
+                                        {stats([
+                                          ["Biriken", e.balance],
+                                          ["Hedef", e.amount],
+                                          ["Kalan", e.amount - e.balance],
+                                          [
+                                            "Dönem başına gereken",
                                             Math.ceil(
-                                              (Date.parse(e.date) -
-                                                Date.parse(today)) /
-                                                86400000 /
-                                                30,
+                                              (e.amount - e.balance) / periods,
                                             ),
-                                          ),
-                                      ),
-                                    )}
-                                  </p>
-                                </>
-                              )}
+                                          ],
+                                        ])}
+                                      </div>
+                                      <small>
+                                        {pct(e.balance / e.amount)} tamamlandı ·{" "}
+                                        {days.toLocaleString("tr-TR")} gün
+                                        kaldı. Kalan tutar{" "}
+                                        {periods.toLocaleString("tr-TR")} adet
+                                        30 günlük döneme bölünür.
+                                      </small>
+                                    </>
+                                  );
+                                })()}
                             </article>
                           ))
                         ) : (
@@ -2388,15 +2879,36 @@ function App() {
               panel(
                 "Portföy dağılımı",
                 <>
+                  <div className="compact-stats">
+                    {stats([
+                      ["Güncel portföy", investments],
+                      ["Toplam maliyet", sum(portfolio, basis)],
+                      ...(!portfolio.some((e) => e.manual)
+                        ? [
+                            [
+                              "Kâr / zarar",
+                              sum(portfolio, (e) => e.balance - basis(e)),
+                            ] as [string, number],
+                          ]
+                        : []),
+                    ])}
+                  </div>
+                  {sum(portfolio, basis) > 0 && (
+                    <p
+                      className={
+                        investments < sum(portfolio, basis)
+                          ? "negative"
+                          : "positive"
+                      }
+                    >
+                      Performans{" "}
+                      {pct(
+                        (investments - sum(portfolio, basis)) /
+                          sum(portfolio, basis),
+                      )}
+                    </p>
+                  )}
                   {pie(portfolioData)}
-                  <p>
-                    Toplam maliyet {fmt(sum(portfolio, basis))} · Değer farkı{" "}
-                    {fmt(
-                      sum(portfolio, (e) =>
-                        e.manual ? 0 : e.balance - basis(e),
-                      ),
-                    )}
-                  </p>
                 </>,
               )}
           </>
@@ -2492,16 +3004,43 @@ function App() {
                   pie([
                     {
                       name: "Harcanan gelir",
+                      color: "#f17f8a",
                       value: Math.min(selected.income, selected.expense),
                     },
                     {
                       name: "Kalan gelir",
+                      color: "#55d39d",
                       value: Math.max(0, selected.income - selected.expense),
                     },
                   ])
                 ),
               )}
-              {panel("Kategori dağılımı", pie(byCategory))}
+              {panel(
+                "Kategori dağılımı",
+                visible && selected.expense > 0 ? (
+                  byCategory
+                    .filter((e) => e.value > 0)
+                    .map((e) => (
+                      <div key={e.name} className="category-chart">
+                        <div className="obligation-line">
+                          <span>
+                            {e.name} · {pct(e.value / selected.expense)}
+                          </span>
+                          <Amount>{fmt(e.value)}</Amount>
+                        </div>
+                        <Meter
+                          label={e.name}
+                          value={e.value}
+                          max={selected.expense}
+                        />
+                      </div>
+                    ))
+                ) : (
+                  <p className="empty">
+                    {visible ? "Veri yok." : "Tutarlar gizli."}
+                  </p>
+                ),
+              )}
               {panel(
                 "Sabit ve değişken gider",
                 pie([
@@ -2531,11 +3070,42 @@ function App() {
             {panel(
               "12 aylık net birikim tahmini",
               <>
+                <div className="compact-stats">
+                  {stats([["Başlangıç net varlığı", summary.net]])}
+                </div>
                 {chart("projection")}
-                <small>
-                  Kayıtlı planları kullanır. Gelecekteki faiz ve piyasa
-                  getirilerini içermez.
-                </small>
+                <details>
+                  <summary>Planlanan gelir ve giderler</summary>
+                  <p>
+                    Kayıtlı işlemler ve tekrarlar kullanılır. Gelecekteki faiz
+                    ve fiyat değişimleri dahil değildir. Net varlık tahmini
+                    banka, kart ve yatırım kayıtlarını birlikte kullanır.
+                  </p>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Dönem</th>
+                        <th>Gelir</th>
+                        <th>Gider</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {projection.map((e) => (
+                        <tr key={e.date}>
+                          <td>
+                            {e.name} {e.date.slice(0, 4)}
+                          </td>
+                          <td>
+                            <Amount>{fmt(e.plannedIncome)}</Amount>
+                          </td>
+                          <td>
+                            <Amount>{fmt(e.plannedExpense)}</Amount>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </details>
               </>,
             )}
             {panel(
@@ -2622,11 +3192,7 @@ function App() {
                             {i + 1}
                             <span className="calendar-dots">
                               {[
-                                ...new Set(
-                                  items.map((e) =>
-                                    isFlow(e) ? statusOf(e, today) : "event",
-                                  ),
-                                ),
+                                ...new Set(items.map((e) => calendarStatus(e))),
                               ].map((status) => (
                                 <i
                                   key={status}
@@ -2640,6 +3206,19 @@ function App() {
                     )}
                   </div>
                 )}
+                <div className="calendar-key">
+                  {Object.entries({
+                    ...stateLabels,
+                    income: "Gelir",
+                    card: "Kredi kartı",
+                    event: "Diğer olay",
+                  }).map(([key, label]) => (
+                    <span key={key}>
+                      <i className={"status-" + key} />
+                      {label}
+                    </span>
+                  ))}
+                </div>
                 <div className="range">
                   <label>
                     Ödeme durumu
@@ -2648,7 +3227,11 @@ function App() {
                       onChange={(e) => setPaymentFilter(e.target.value)}
                     >
                       <option value="">Tümü</option>
-                      {Object.entries(stateLabels).map(([key, value]) => (
+                      {Object.entries({
+                        ...stateLabels,
+                        income: "Gelir",
+                        card: "Kredi kartı",
+                      }).map(([key, value]) => (
                         <option value={key} key={key}>
                           {value}
                         </option>
@@ -2661,49 +3244,76 @@ function App() {
                   events.filter(
                     (e) =>
                       (calendarList || e.date === calendarDate) &&
-                      (!paymentFilter ||
-                        (isFlow(e) && statusOf(e, today) === paymentFilter)),
+                      (!paymentFilter || calendarStatus(e) === paymentFilter),
                   ),
                   "Bu görünümde kayıt yok.",
                   true,
                 )}
               </>,
-              <button
-                className="link"
-                onClick={() =>
-                  newEntry("expense", { date: calendarDate, paid: false })
-                }
-              >
-                Gider ekle
-              </button>,
+              <span className="asset-actions">
+                <button
+                  className="link"
+                  onClick={() =>
+                    newEntry("income", { date: calendarDate, paid: false })
+                  }
+                >
+                  Gelir ekle
+                </button>
+                <button
+                  className="link"
+                  onClick={() =>
+                    newEntry("expense", { date: calendarDate, paid: false })
+                  }
+                >
+                  Gider ekle
+                </button>
+              </span>,
             )}
             {panel(
               "Bekleyen ödemeler",
-              <div className="metrics">
-                {stats([
-                  ["7 gün", upcomingPay(7)],
-                  ["30 gün", upcomingPay(30)],
-                  ["Gecikmiş", overduePay],
-                  [
-                    "Bu ay bekleyen faturalar",
-                    sum(
-                      unfulfilled(calendarStart, calendarEnd),
-                      (e) => e.amount,
-                    ),
-                  ],
-                ])}
-              </div>,
+              <>
+                {paymentDetails(
+                  "7 gün",
+                  windowItems(7),
+                  dateLabel(today) +
+                    " – " +
+                    dateLabel(addDays(today, 6)) +
+                    " (iki gün dahil).",
+                )}
+                {paymentDetails(
+                  "30 gün",
+                  windowItems(30),
+                  dateLabel(today) +
+                    " – " +
+                    dateLabel(addDays(today, 29)) +
+                    " (iki gün dahil).",
+                )}
+                {paymentDetails(
+                  "Gecikmiş",
+                  lateItems,
+                  "Bugünden önce vadesi gelen ödenmemiş faturalar ve ekstreler.",
+                )}
+              </>,
             )}
           </>
         )}
         {ready && tab === "Ayarlar" && (
           <>
             {panel(
-              "Görünüm ve veri modu",
+              "Görünüm",
               <div className="settings">
                 <button onClick={() => setDark(!dark)}>
                   {dark ? "Aydınlık temaya geç" : "Karanlık temaya geç"}
                 </button>
+              </div>,
+            )}
+            {panel(
+              "Veri modu",
+              <div className="settings">
+                <p>
+                  {mode === "personal" ? "Kişisel kayıtlar" : "Örnek veriler"}{" "}
+                  etkin.
+                </p>
                 <button
                   onClick={() => {
                     setReady(false);
@@ -2715,7 +3325,6 @@ function App() {
                     ? "Örnek verileri aç"
                     : "Kişisel kayıtlara dön"}
                 </button>
-                <p>Finans360 2.0.0 · Türkçe · Türk lirası</p>
               </div>,
             )}
             {panel(
@@ -2739,74 +3348,43 @@ function App() {
               </label>,
             )}
             {panel(
-              "Uygulama kilidi",
-              <div className="settings">
+              "Gizlilik ve uygulama kilidi",
+              <>
                 <p>
-                  PIN ekranı finansal verileri şifrelemez. Uygulama arka plana
-                  geçtiğinde veya 3 dakika kullanılmadığında kilitlenir.
+                  GitHub Pages adresi ve kaynak kodu herkese açık olabilir.
+                  Kişisel finans kayıtları bu cihazın IndexedDB alanında kalır.
+                  Uygulama finans verisi için sunucu, reklam veya izleme hizmeti
+                  kullanmaz.
                 </p>
-                <form
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    const form = event.currentTarget;
-                    const value = String(new FormData(form).get("pin") ?? "");
-                    run(async () => {
-                      if (pin) {
-                        await reveal(value, pin);
-                        localStorage.removeItem("finans360-lock");
-                        setPin("");
-                      } else {
-                        const valueProtected = await protect(
-                          value,
-                          "Finans360",
-                        );
-                        localStorage.setItem("finans360-lock", valueProtected);
-                        setPin(valueProtected);
-                      }
-                      form.reset();
-                    });
+                <PinSettings
+                  pin={pin}
+                  save={(value) => {
+                    if (value) localStorage.setItem("finans360-lock", value);
+                    else localStorage.removeItem("finans360-lock");
+                    setPin(value);
                   }}
-                >
-                  <label>
-                    {pin ? "Mevcut PIN" : "Yeni PIN"}
-                    <input
-                      type="password"
-                      inputMode="numeric"
-                      autoComplete="off"
-                      name="pin"
-                      pattern="[0-9]{6,12}"
-                      required
-                      placeholder="6–12 rakam"
-                    />
-                  </label>
-                  <button type="submit">
-                    {pin ? "Kilidi kaldır" : "Uygulama kilidini aç"}
-                  </button>
-                </form>
+                  minutes={minutes}
+                  setMinutes={(value) => {
+                    setMinutes(value);
+                    localStorage.setItem(
+                      "finans360-lock-minutes",
+                      String(value),
+                    );
+                  }}
+                />
+              </>,
+            )}
+            {panel(
+              "Uygulama bilgisi",
+              <div className="settings">
+                <p>Finans360 2.1.0 · Türkçe · Türk lirası</p>
+                <button onClick={checkVersion}>Yeni sürümü kontrol et</button>
+                {versionStatus && <p role="status">{versionStatus}</p>}
               </div>,
             )}
             {panel(
-              "Yedekleme ve dışa aktarma",
+              "Dışa aktarma",
               <div className="settings">
-                <button
-                  onClick={() =>
-                    download(
-                      "finans360-" + mode + ".json",
-                      new Blob(
-                        [
-                          JSON.stringify(
-                            { version: 1, mode, records: rows },
-                            null,
-                            2,
-                          ),
-                        ],
-                        { type: "application/json" },
-                      ),
-                    )
-                  }
-                >
-                  JSON yedeği indir
-                </button>
                 <button
                   onClick={() =>
                     run(async () => {
@@ -2893,43 +3471,61 @@ function App() {
                 >
                   Excel dosyası indir
                 </button>
-                <form
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    const form = event.currentTarget;
-                    const password = String(
-                      new FormData(form).get("password") ?? "",
-                    );
-                    run(async () => {
-                      const encrypted = await protect(
-                        password,
-                        JSON.stringify({ version: 1, mode, records: rows }),
-                      );
-                      download(
-                        "finans360-sifreli.json",
-                        new Blob([encrypted], { type: "application/json" }),
-                      );
-                      form.reset();
-                    });
-                  }}
-                >
-                  <label>
-                    Yedek parolası
-                    <input
-                      type="password"
-                      name="password"
-                      minLength={10}
-                      maxLength={256}
-                      required
-                      autoComplete="new-password"
-                    />
-                  </label>
-                  <button type="submit">Şifreli JSON yedeği indir</button>
-                  <p>
-                    Yedek hassas finansal bilgiler içerir. Şifreli yedeğin
-                    parolasını unutursanız dosyayı açamazsınız.
-                  </p>
-                </form>
+              </div>,
+            )}
+            {panel(
+              "Yedekleme",
+              <div className="settings">
+                <button onClick={() => run(() => createBackup())}>
+                  Normal JSON yedeği indir
+                </button>
+                <details>
+                  <summary>Şifreli JSON yedeği</summary>
+                  <form
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      const form = event.currentTarget;
+                      const values = new FormData(form);
+                      const password = String(values.get("password") ?? "");
+                      run(async () => {
+                        if (password !== values.get("repeat"))
+                          throw new Error(
+                            "Yedek parolası ve doğrulaması eşleşmiyor.",
+                          );
+                        await createBackup(password);
+                        form.reset();
+                      });
+                    }}
+                  >
+                    <label>
+                      Yedek parolası
+                      <input
+                        type="password"
+                        name="password"
+                        minLength={10}
+                        maxLength={256}
+                        required
+                        autoComplete="new-password"
+                      />
+                    </label>
+                    <label>
+                      Yedek parolası doğrulaması
+                      <input
+                        type="password"
+                        name="repeat"
+                        minLength={10}
+                        required
+                        autoComplete="new-password"
+                      />
+                    </label>
+                    <button type="submit">Şifreli JSON yedeği indir</button>
+                  </form>
+                </details>
+                <p>
+                  Yedekler hassas bilgiler içerir. Şifreli yedeğin parolası
+                  unutulursa yedek açılamaz.
+                </p>
+                {backupStatus && <p role="status">{backupStatus}</p>}
                 <label>
                   Geri yükleme parolası (şifreli yedek için)
                   <input
@@ -2972,20 +3568,47 @@ function App() {
                             );
                           if (
                             confirm(
-                              "Etkin veri modundaki kayıtlar bu yedekle değiştirilsin mi?",
+                              (mode === "demo"
+                                ? "Örnek veri"
+                                : "Kişisel veri") +
+                                " modundaki mevcut " +
+                                rows.length +
+                                " kayıt, yedekteki " +
+                                data.length +
+                                " kayıtla değiştirilecek. Onaylıyor musunuz?",
                             )
-                          )
+                          ) {
                             await mutate(() => data);
+                            setBackupStatus(
+                              "Yedek geri yüklendi · " +
+                                new Date().toLocaleString("tr-TR"),
+                            );
+                          }
                         });
                     }}
                   />
                 </label>
+              </div>,
+            )}
+            {panel(
+              "Tehlikeli işlemler",
+              <div className="settings">
+                <p>Silmeden önce etkin veri modunun yedeğini alın.</p>
                 <button
                   className="danger"
                   onClick={() => {
+                    const name = mode === "personal" ? "Kişisel" : "Örnek";
                     if (
                       confirm(
-                        "Etkin veri modundaki tüm kayıtlar kalıcı olarak silinsin mi?",
+                        name +
+                          " modundaki kayıtlar silinecek. Yedek aldınız mı?",
+                      ) &&
+                      confirm(
+                        "Son onay: " +
+                          name.toLocaleLowerCase("tr") +
+                          " modundaki " +
+                          rows.length +
+                          " kaydı kalıcı olarak silmek istiyor musunuz?",
                       )
                     )
                       run(() => mutate(() => []));
@@ -2993,10 +3616,6 @@ function App() {
                 >
                   Bu moddaki kayıtları sil
                 </button>
-                <p>
-                  Kayıtlar bu cihazın tarayıcısında tutulur. Yedek dosyanızı
-                  güvenli bir yerde saklayın.
-                </p>
               </div>,
             )}
           </>
@@ -3051,6 +3670,7 @@ function App() {
           entry={entry}
           rows={rows}
           close={() => setEntry(undefined)}
+          masked={!visible}
           occurrence={Boolean(occurrence)}
           save={(e, scope) =>
             mutate((data) => {
