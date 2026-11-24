@@ -1047,10 +1047,12 @@ function App() {
   }, [dark]);
   const mutate = async (change: (data: Data) => Data) =>
     setRows(await update(mode, initial, (rows) => validateData(change(rows))));
-  const run = (action: () => Promise<unknown>) =>
+  const run = (action: () => Promise<unknown>) => {
+    setError("");
     void action().catch((e) =>
       setError(e instanceof Error ? e.message : "İşlem tamamlanamadı."),
     );
+  };
   const newEntry = (kind: Kind, defaults: Partial<Entry> = {}) => {
     setChooser(false);
     setOccurrence(undefined);

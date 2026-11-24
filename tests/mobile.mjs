@@ -303,6 +303,25 @@ try {
               .click();
             await form(label);
           }
+          await nav("Varlıklar").click();
+          const asset = (name) =>
+            page
+              .getByRole("group", { name: "Varlık türü" })
+              .getByRole("button", { name, exact: true });
+          await asset("Bankalar").click();
+          await page
+            .getByRole("button", { name: "Bakiyeyi düzelt", exact: true })
+            .click();
+          await form("Bakiye düzeltmesi");
+          await asset("Yatırımlar").click();
+          await page
+            .getByRole("button", { name: "Geçmiş değer kaydet", exact: true })
+            .click();
+          await form("Portföy değeri");
+          await page
+            .getByRole("button", { name: "Alım / satım kaydet", exact: true })
+            .click();
+          await form("Yatırım hareketi");
         }
       }
     }
@@ -323,6 +342,59 @@ try {
           label.endsWith("PDF") ? "%PDF" : "PK",
         );
       }
+      await settings();
+      const normalDownload = page.waitForEvent("download");
+      await page
+        .getByRole("button", { name: "Normal JSON yedeği indir" })
+        .click();
+      const original = JSON.parse(
+        await readFile(await (await normalDownload).path(), "utf8"),
+      );
+      assert.equal(original.mode, "demo");
+      assert.ok(original.records.some((e) => e.name === "Büyük tutar testi"));
+      await page.getByText("Şifreli JSON yedeği", { exact: true }).click();
+      await page
+        .getByLabel("Yedek parolası", { exact: true })
+        .fill("örnek güçlü parola");
+      await page
+        .getByLabel("Yedek parolası doğrulaması", { exact: true })
+        .fill("başka örnek parola");
+      await page
+        .getByRole("button", { name: "Şifreli JSON yedeği indir", exact: true })
+        .click();
+      await page
+        .getByText("Yedek parolası ve doğrulaması eşleşmiyor.")
+        .waitFor();
+      await page
+        .getByLabel("Yedek parolası doğrulaması", { exact: true })
+        .fill("örnek güçlü parola");
+      const protectedDownload = page.waitForEvent("download");
+      await page
+        .getByRole("button", { name: "Şifreli JSON yedeği indir", exact: true })
+        .click();
+      const backup = await readFile(await (await protectedDownload).path());
+      assert.equal(JSON.parse(backup.toString()).encrypted, 1);
+      assert.ok(!backup.toString().includes("Büyük tutar testi"));
+      const restore = page.getByLabel("JSON yedeğinden geri yükle");
+      const restorePassword = page.getByLabel("Geri yükleme parolası");
+      await restorePassword.fill("yanlış parola");
+      await restore.setInputFiles({
+        name: "yedek.json",
+        mimeType: "application/json",
+        buffer: backup,
+      });
+      await page.getByText("Parola yanlış veya şifreli dosya bozuk.").waitFor();
+      await restorePassword.fill("örnek güçlü parola");
+      page.once("dialog", async (dialog) => {
+        assert.match(dialog.message(), /Örnek veri/);
+        await dialog.accept();
+      });
+      await restore.setInputFiles({
+        name: "yedek.json",
+        mimeType: "application/json",
+        buffer: backup,
+      });
+      await page.getByText(/Yedek geri yüklendi/).waitFor();
       await page.evaluate(() => navigator.serviceWorker.ready.then(() => true));
       await page.waitForFunction(() => !!navigator.serviceWorker.controller);
       await nav("Özet").click();
