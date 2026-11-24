@@ -1414,7 +1414,7 @@ function App() {
         <strong
           className={
             value < 0 ||
-            (!/eksi gider/i.test(name) && /gider|borç|açığı/i.test(name))
+            (!/eksi gider/i.test(name) && /gider|bor[çc]|açığı/i.test(name))
               ? "negative"
               : /gelir|kâr/i.test(name)
                 ? "positive"
