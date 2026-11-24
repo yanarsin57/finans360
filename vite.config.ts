@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 
 export default defineConfig({
   base: "/finans360/",
+  build: { modulePreload: { polyfill: false } },
   plugins: [
     tailwind(),
     {
@@ -48,13 +49,25 @@ self.addEventListener('message', event => {
   if (event.data === 'FINANS360_ACTIVATE') event.waitUntil(self.skipWaiting());
 });
 self.addEventListener('activate', event => {
-  event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key.startsWith('finans360-') && key !== cacheName).map(key => caches.delete(key)))).then(() => self.clients.claim()));
+  event.waitUntil(caches.keys().then(keys => {
+    const previous = keys.filter(key => key.startsWith('finans360-') && key !== cacheName);
+    return Promise.all(previous.slice(0, -1).map(key => caches.delete(key)));
+  }).then(() => self.clients.claim()));
 });
 self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET' || !event.request.url.startsWith(self.registration.scope)) return;
   event.respondWith(caches.open(cacheName).then(async cache => {
     if (event.request.mode === 'navigate') return await cache.match('./index.html') || fetch(event.request);
-    return await cache.match(event.request) || fetch(event.request);
+    const current = await cache.match(event.request);
+    if (current) return current;
+    if (new URL(event.request.url).pathname.startsWith(new URL('assets/', self.registration.scope).pathname)) {
+      const previous = (await caches.keys()).filter(key => key.startsWith('finans360-') && key !== cacheName).at(-1);
+      if (previous) {
+        const retained = await (await caches.open(previous)).match(event.request);
+        if (retained) return retained;
+      }
+    }
+    return fetch(event.request);
   }));
 });
 `,

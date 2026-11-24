@@ -51,7 +51,7 @@ export function InterestComparison({
   const value = (e: Entry) =>
     order === "net" ? interest(e, e.days!).net : (e[order] ?? 0);
   return (
-    <details>
+    <details className="offer-comparison">
       <summary>Faiz tekliflerini karşılaştır</summary>
       <form onSubmit={add}>
         <div className="fields">
@@ -107,7 +107,8 @@ export function InterestComparison({
                   </small>
                   <small>
                     Brüt {fmt(interest(e, e.days!).gross)} · Net{" "}
-                    {fmt(interest(e, e.days!).net)}
+                    {fmt(interest(e, e.days!).net)} · Vade sonu{" "}
+                    {fmt(e.amount + interest(e, e.days!).net)}
                   </small>
                 </div>
                 <button

@@ -35,3 +35,12 @@ Node.js 24 ile `npm ci`, `npm test` ve `npm run build` çalıştırın. Gelişti
 - İsteğe bağlı PIN ekranı arka plana geçişte ve üç dakika kullanılmadığında kilitlenir. PIN doğrulaması cihazda yapılır. Bu ekran IndexedDB kayıtlarını şifrelemez ve Face ID kullanılmaz. PIN ekranı ve tema ayarları yedek dosyasına dahil edilmez.
 - Şifreli JSON yedeklerinde PBKDF2 ve AES-GCM kullanılır. Dosya kişisel finans kayıtlarını içerir. Parola unutulursa şifreli dosya kurtarılamaz.
 - Güncelleme geldiğinde **Güncelle** düğmesi açık kayıt formu kapatıldıktan sonra kullanılabilir. Eski sürümden geçişte güncelleme görünmezse uygulamayı kapatıp yeniden açın. Mevcut uygulama adresi, PWA kimliği ve IndexedDB alanı korunur.
+
+## Finans360 2.1
+
+- Özet kartının üst kısmı güncel finansal durumu, aylık bütçe bölümü seçilen ayı gösterir. **Maaşa kadar → Borç ve faturalar** bölümünde hesaplamaya dahil olan kalemleri açabilirsiniz. Gecikmiş ve maaş günü dahil vadesi gelen ödemeler düşülür. Günlük bütçe, kalan nakdin takvim günü sayısına (en az bir) bölünüp aşağı kuruşa yuvarlanmasıyla hesaplanır.
+- Kartta **Son ekstre kesim tarihi** ve ekstre tutarı girildiğinde ödeme takibi o ekstre dönemine bağlanır. Tarih girilmemiş eski kayıtlarda uygulama, kayıtlı aylık kesim gününden dönem tahmini yapar.
+- Ayrıntılı yatırım takibinde, alım veya satışa isterseniz banka hesabı bağlayın. Bağlı alımlar nakdi düşürür, satışlar artırır. Aynı hareket için ayrıca banka kaydı oluşturmayın. Önceden girilmiş bağlantısız yatırım hareketleri eski davranışlarını korur.
+- **Ayarlar → Uygulama bilgisi** bölümünde yeni sürümü kontrol edebilirsiniz. Güncelleme, açık kayıt formu kapandıktan sonra etkinleştirilebilir. Adres, PWA kimliği ve IndexedDB alanı aynı kalır.
+- Yedek oluşturma sonucu indirmenin başlatıldığını bildirir. Dosyanın cihazda bulunduğunu iPhone’un **Dosyalar** uygulamasında kontrol edin.
+- Mobil regresyon testi için üretim derlemesinden sonra `npx playwright install chromium` ve `npm run test:mobile` çalıştırın. Kurulu Chromium için `MOBILE_BROWSER` yolunu, WebKit için `MOBILE_ENGINE=webkit` değişkenini kullanabilirsiniz. `MOBILE_SCREENSHOTS` ekran görüntüsü dizini için isteğe bağlıdır.

@@ -189,7 +189,7 @@ p {
   gap: 6px;
   min-width: 0;
 }
-.stat span,
+.stat > span,
 .muted,
 small,
 .asset p,
@@ -197,7 +197,7 @@ small,
 .empty {
   color: var(--muted);
 }
-.hero .stat span {
+.hero .stat > span {
   color: #beded1;
 }
 .stat strong {
@@ -810,4 +810,385 @@ select {
   display: inline;
   vertical-align: middle;
   margin-inline-end: 3px;
+}
+
+/* The shell owns viewport height. Only main scrolls; navigation gets its own row. */
+:root {
+  --gap: 10px;
+  --card-radius: 16px;
+}
+html,
+body,
+#root {
+  inline-size: 100%;
+  margin: 0;
+  min-inline-size: 0;
+}
+body {
+  overflow: hidden;
+}
+.shell {
+  inline-size: 100%;
+  max-inline-size: 1080px;
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: env(safe-area-inset-top) 0 0;
+}
+.shell > .top,
+.shell > main {
+  min-inline-size: 0;
+  padding-inline: max(12px, env(safe-area-inset-left))
+    max(12px, env(safe-area-inset-right));
+}
+.shell > .top {
+  flex: none;
+  min-height: 55px;
+}
+.shell > main {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior-y: contain;
+  padding-block-end: 12px;
+}
+.shell > .nav {
+  position: relative;
+  inset: auto;
+  transform: none;
+  flex: none;
+  align-self: center;
+  padding: 3px max(4px, env(safe-area-inset-right))
+    calc(3px + env(safe-area-inset-bottom)) max(4px, env(safe-area-inset-left));
+}
+.nav button {
+  min-height: 44px;
+  gap: 1px;
+}
+.heading {
+  margin: 12px 0;
+  align-items: center;
+}
+h1 {
+  font-size: clamp(1.55rem, 5.1vw, 2.25rem);
+}
+h2 {
+  font-size: 1.04rem;
+  font-weight: 680;
+}
+.panel,
+.metrics > .stat {
+  border-radius: var(--card-radius);
+  padding: 12px;
+}
+.hero {
+  border-radius: 20px;
+}
+.hero-stats,
+.compact-stats,
+.budget-lines {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px 12px;
+}
+.compact-stats,
+.budget-lines {
+  margin-block: 8px;
+}
+.stat strong,
+.net {
+  overflow-wrap: normal;
+}
+.stat > strong .amount,
+.net .amount,
+.entry-row > .amount {
+  display: block;
+}
+.amount {
+  display: block;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+.amount > span {
+  display: inline-block;
+  white-space: nowrap;
+}
+.entry-row > .amount {
+  flex: 0 1 40%;
+  text-align: end;
+  font-weight: 700;
+}
+.entry-row {
+  gap: 7px;
+  padding-block: 7px;
+}
+.entry-row > .row-icon {
+  width: 32px;
+  height: 32px;
+}
+.range,
+.fields {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.range label,
+.fields label,
+.settings label {
+  min-width: 0;
+  max-width: 100%;
+}
+input[type="date"],
+select {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+input[type="date"]::-webkit-date-and-time-value {
+  min-width: 0;
+  width: 100%;
+}
+.sheet {
+  min-width: 0;
+}
+.sheet form {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.sheet form .fields {
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 3px;
+}
+.sheet form .actions {
+  flex: none;
+  margin-top: 6px;
+}
+.sheet .field-error {
+  margin: 4px;
+  color: var(--danger);
+}
+.meter {
+  width: 100%;
+  height: 7px;
+  overflow: hidden;
+  border-radius: 100px;
+  background: var(--line);
+  margin-block: 8px;
+}
+.meter span {
+  display: block;
+  height: 100%;
+  background: var(--green);
+  border-radius: inherit;
+}
+.meter.warning span {
+  background: var(--warning);
+}
+.meter.negative span {
+  background: var(--danger);
+}
+.budget-item {
+  display: block;
+  text-align: start;
+  width: 100%;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
+.budget-item .compact-stats {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.filter-panel > summary,
+.obligations > summary,
+.offer-comparison > summary {
+  min-height: 44px;
+  padding-block: 10px;
+  cursor: pointer;
+  color: var(--green);
+}
+.asset-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+.asset-account {
+  border: 1px solid var(--line);
+  border-radius: var(--card-radius);
+  padding: 9px;
+  margin-bottom: 8px;
+}
+.asset-account .entry-row {
+  border-top: 0;
+}
+.asset-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 15px;
+}
+.chart-summary {
+  font-weight: 720;
+  text-align: center;
+  margin: 5px 0;
+}
+.chart-list {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+}
+.chart-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(80px, 40%) 48px;
+  align-items: center;
+  gap: 6px;
+}
+.chart-list .amount {
+  text-align: end;
+}
+.chart-list small {
+  text-align: end;
+}
+.chart-list i,
+.calendar-key i {
+  width: 8px;
+  height: 8px;
+  display: inline-block;
+  border-radius: 50%;
+  margin-inline-end: 4px;
+  background: currentColor;
+}
+.chart {
+  height: 160px;
+}
+.chart-pie {
+  height: 134px;
+}
+.chart svg {
+  outline: none;
+}
+.status-income {
+  color: var(--green);
+}
+.status-card {
+  color: #7698d9;
+}
+.calendar-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-size: 0.78rem;
+  margin-block: 8px;
+}
+.calendar button[aria-current="date"] {
+  border-style: dashed;
+  border-color: var(--green);
+}
+.calendar button[aria-pressed="true"] {
+  background: var(--soft);
+  outline: 2px solid var(--green);
+  outline-offset: -3px;
+}
+.obligation-line {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(80px, 40%);
+  gap: 7px;
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+}
+.obligation-line .amount {
+  text-align: end;
+}
+@media (max-width: 460px) {
+  .range:has(input[type="date"]),
+  .fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .shell > .top {
+    min-height: 52px;
+  }
+  .hero {
+    padding: 12px;
+  }
+  .top-controls .icon {
+    min-width: 40px;
+    min-height: 44px;
+  }
+  .demo {
+    max-width: 42px;
+    line-height: 1.1;
+  }
+}
+@media print {
+  body {
+    overflow: visible;
+  }
+}
+.private-editor input[inputmode="decimal"] {
+  -webkit-text-security: disc;
+}
+.transaction-search {
+  display: grid;
+  gap: 4px;
+  margin-block: 8px;
+}
+.transaction-search input {
+  min-height: 44px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  padding: 7px 9px;
+  background: var(--soft);
+  color: var(--text);
+}
+.asset .link + .link {
+  margin-inline-start: 12px;
+}
+.chart-list li > span:first-child {
+  overflow-wrap: anywhere;
+}
+.settings details > summary,
+.panel details > summary {
+  cursor: pointer;
+}
+
+.hero-top small {
+  color: #beded1;
+}
+.hero .stat strong.negative {
+  color: #ffb4b4;
+}
+.hero .stat strong.positive {
+  color: #87f5bf;
+}
+.top-controls {
+  flex: none;
+}
+.compact-stats .stat {
+  align-content: space-between;
+}
+.selected-label {
+  overflow-wrap: anywhere;
+}
+.segment button[aria-pressed="true"] {
+  border-color: var(--green);
+}
+.lock-screen {
+  height: 100dvh;
+  overflow: auto;
+}
+@media (max-width: 360px) {
+  .brand {
+    gap: 6px;
+    font-size: 1.03rem;
+  }
+  .brand-icon {
+    width: 31px;
+    height: 31px;
+  }
+  .shell > .top {
+    column-gap: 5px;
+  }
 }

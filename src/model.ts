@@ -76,6 +76,7 @@ export type Entry = {
   manual?: boolean;
   priceDate?: string;
   balanceFrom?: string;
+  statementDate?: string;
 };
 export type Data = Entry[];
 export const labels: Record<Kind, string> = {
@@ -213,6 +214,9 @@ export function balances(
   projected = false,
   projectionStart = through,
 ) {
+  const trades = rows.filter(
+    (e) => e.kind === "trade" && e.source && e.date <= through,
+  );
   const flows = scheduled(rows, through).filter(
     (e) => completed(e) || (projected && e.date >= projectionStart),
   );
@@ -235,7 +239,12 @@ export function balances(
         ["account", "card", "deposit", "investment"].includes(e.kind),
     )
     .map((e) => {
-      const movements = e.kind === "card" ? debtFlows : flows;
+      const movements =
+        e.kind === "card"
+          ? debtFlows
+          : e.kind === "account"
+            ? [...flows, ...trades]
+            : flows;
       const adjustment = rows
         .filter(
           (row) =>
@@ -269,6 +278,8 @@ export function balances(
                   : f.target === e.id && f.kind === "payment"
                     ? -f.amount
                     : 0;
+              if (f.kind === "trade" && f.source === e.id)
+                return f.category === "Alım" ? -f.amount : f.amount;
               return (
                 (f.target === e.id && ["income", "transfer"].includes(f.kind)
                   ? f.amount
@@ -413,7 +424,13 @@ export function validateEntry(e: Entry) {
     throw new Error("Yatırım hareketi için pozitif adet ve tutar girin.");
   if (e.kind === "goal" && (e.saved ?? 0) > e.amount)
     throw new Error("Birikim hedefi aşmamalı.");
-  for (const date of [e.until, e.priceDate, e.balanceFrom, e.anchor]) {
+  for (const date of [
+    e.until,
+    e.priceDate,
+    e.balanceFrom,
+    e.anchor,
+    e.statementDate,
+  ]) {
     if (date !== undefined && (typeof date !== "string" || !dateValid(date)))
       throw new Error("Tarih geçersiz.");
   }
@@ -498,6 +515,7 @@ export function validateData(rows: Data) {
     if (
       (e.kind === "adjustment" && target !== "account") ||
       (["valuation", "trade"].includes(e.kind) && target !== "investment") ||
+      (e.kind === "trade" && e.source !== undefined && source !== "account") ||
       (e.kind === "trade" &&
         rows.some((asset) => asset.id === e.target && asset.manual)) ||
       (e.kind === "income" && e.target && !cashLike(target)) ||
@@ -600,21 +618,22 @@ export const isFixed = (e: Entry) =>
 export function cardObligations(rows: Data, asOf: string, through: string) {
   return balances(rows, asOf).flatMap((card) => {
     if (card.kind !== "card" || !card.dueDay || card.balance <= 0) return [];
-    const thisDue = dateInMonth(asOf, card.dueDay);
+    const date =
+      card.statementDate ??
+      (card.cutDay ? dateInMonth(asOf, card.cutDay) : undefined);
+    const cutoff =
+      date && date <= asOf
+        ? date
+        : card.cutDay
+          ? dateInMonth(month(asOf, -1), card.cutDay)
+          : undefined;
     const due =
-      card.statement !== undefined &&
-      thisDue < asOf &&
-      card.cutDay !== undefined &&
-      nextDayOfMonth(asOf, card.cutDay) < nextDayOfMonth(asOf, card.dueDay)
-        ? thisDue
+      cutoff && card.statement !== undefined
+        ? nextDayOfMonth(cutoff, card.dueDay)
         : nextDayOfMonth(asOf, card.dueDay);
     if (due > through) return [];
-    const cutoff =
-      card.cutDay && card.cutDay <= card.dueDay
-        ? dateInMonth(due, card.cutDay)
-        : dateInMonth(month(due, -1), card.cutDay ?? 1);
     const paid = sum(
-      scheduled(rows, asOf, cutoff).filter(
+      scheduled(rows, asOf, cutoff ?? card.date).filter(
         (e) => e.kind === "payment" && e.target === card.id && completed(e),
       ),
       (e) => e.amount,
@@ -626,9 +645,41 @@ export function cardObligations(rows: Data, asOf: string, through: string) {
         card.statement === undefined ? card.balance : card.statement - paid,
       ),
     );
-    return amount ? [{ id: card.id, date: due, amount }] : [];
+    return amount
+      ? [
+          {
+            id: card.id,
+            name:
+              card.name +
+              " · " +
+              (card.statement === undefined ? "Kart borcu" : "Ekstre"),
+            date: due,
+            amount,
+          },
+        ]
+      : [];
   });
 }
+export function paymentItems(
+  rows: Data,
+  date: string,
+  through: string,
+  from = "0000-01-01",
+) {
+  const cards = new Set(rows.filter((e) => e.kind === "card").map((e) => e.id));
+  const bills = scheduled(rows, through, from).filter(
+    (e) =>
+      e.kind === "expense" &&
+      statusOf(e, date) !== "paid" &&
+      (isFixed(e) || !completed(e)) &&
+      !cards.has(e.source ?? ""),
+  );
+  return [
+    ...bills,
+    ...cardObligations(rows, date, through).filter((e) => e.date >= from),
+  ].sort((a, b) => a.date.localeCompare(b.date));
+}
+
 export function availableUntilSalary(
   rows: Data,
   date: string,
@@ -636,20 +687,11 @@ export function availableUntilSalary(
 ) {
   const salary = nextDayOfMonth(date, salaryDay);
   const days = Math.max(1, daysBetween(date, salary));
-  const current = balances(rows, date);
   const cash = sum(
-    current.filter((e) => e.kind === "account"),
+    balances(rows, date).filter((e) => e.kind === "account"),
     (e) => e.balance,
   );
-  const bills = scheduled(rows, salary).filter(
-    (e) =>
-      e.kind === "expense" &&
-      statusOf(e, date) !== "paid" &&
-      (isFixed(e) || !completed(e)) &&
-      current.find((a) => a.id === e.source)?.kind !== "card",
-  );
-  const cardDue = sum(cardObligations(rows, date, salary), (e) => e.amount);
-  const required = sum(bills, (e) => e.amount) + cardDue;
+  const required = sum(paymentItems(rows, date, salary), (e) => e.amount);
   return {
     salary,
     days,
