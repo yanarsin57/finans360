@@ -8,6 +8,20 @@ export default defineConfig({
     tailwind(),
     {
       name: "offline-shell",
+      apply: "build",
+      transformIndexHtml() {
+        return [
+          {
+            tag: "meta",
+            attrs: {
+              "http-equiv": "Content-Security-Policy",
+              content:
+                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'none'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'",
+            },
+            injectTo: "head-prepend",
+          },
+        ];
+      },
       generateBundle(_options, bundle) {
         const files = [
           "./",
@@ -28,7 +42,10 @@ export default defineConfig({
 const cacheName = 'finans360-${version}';
 const files = ${JSON.stringify(files)};
 self.addEventListener('install', event => {
-  event.waitUntil(caches.open(cacheName).then(cache => cache.addAll(files)).then(() => self.skipWaiting()));
+  event.waitUntil(caches.open(cacheName).then(cache => cache.addAll(files)));
+});
+self.addEventListener('message', event => {
+  if (event.data === 'FINANS360_ACTIVATE') event.waitUntil(self.skipWaiting());
 });
 self.addEventListener('activate', event => {
   event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key.startsWith('finans360-') && key !== cacheName).map(key => caches.delete(key)))).then(() => self.clients.claim()));

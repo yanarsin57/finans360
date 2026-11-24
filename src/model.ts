@@ -33,6 +33,9 @@ export const kinds = [
   "investment",
   "goal",
   "budget",
+  "adjustment",
+  "valuation",
+  "trade",
 ] as const;
 export type Kind = (typeof kinds)[number];
 export type Entry = {
@@ -60,6 +63,19 @@ export type Entry = {
   price?: number;
   cost?: number;
   saved?: number;
+  bank?: string;
+  color?: string;
+  icon?: string;
+  frequency?: "weekly" | "monthly" | "quarterly" | "yearly";
+  until?: string;
+  anchor?: string;
+  exceptions?: string[];
+  createdAt?: number;
+  fixed?: boolean;
+  compound?: boolean;
+  manual?: boolean;
+  priceDate?: string;
+  balanceFrom?: string;
 };
 export type Data = Entry[];
 export const labels: Record<Kind, string> = {
@@ -73,6 +89,9 @@ export const labels: Record<Kind, string> = {
   investment: "Yatırım",
   goal: "Hedef",
   budget: "Kategori ve bütçe",
+  adjustment: "Bakiye düzeltmesi",
+  valuation: "Portföy değeri",
+  trade: "Yatırım hareketi",
 };
 export const money = (value: number) =>
   new Intl.NumberFormat("tr-TR", { style: "currency", currency: "TRY" }).format(
@@ -109,6 +128,16 @@ export const sum = <T>(rows: T[], select: (row: T) => number) =>
   rows.reduce((total, row) => total + select(row), 0);
 export const interest = (deposit: Entry, days: number) => {
   const eligible = Math.max(0, deposit.amount - (deposit.excluded ?? 0));
+  if (deposit.compound) {
+    const daily = (deposit.rate ?? 0) / 36500;
+    const gross = eligible * Math.expm1(days * Math.log1p(daily));
+    if (!Number.isSafeInteger(Math.round(gross)))
+      throw new Error("Tahmini getiri hesaplama sınırını aşıyor.");
+    return {
+      gross: Math.round(gross),
+      net: Math.round(gross * (1 - (deposit.tax ?? 0) / 100)),
+    };
+  }
   const numerator =
     BigInt(eligible) *
     BigInt(Math.round((deposit.rate ?? 0) * 100)) *
@@ -124,7 +153,7 @@ export const interest = (deposit: Entry, days: number) => {
   };
 };
 export const market = (e: Entry) =>
-  Math.round((e.units ?? 0) * (e.price ?? e.cost ?? 0));
+  e.manual ? e.amount : Math.round((e.units ?? 0) * (e.price ?? e.cost ?? 0));
 export const basis = (e: Entry) => Math.round((e.units ?? 0) * (e.cost ?? 0));
 export const isFlow = (e: Entry) =>
   ["income", "expense", "transfer", "payment"].includes(e.kind);
@@ -137,20 +166,27 @@ export function scheduled(
   return rows.filter(isFlow).flatMap((e) => {
     if (!e.recurring && !((e.installments ?? 1) > 1))
       return e.date >= from && e.date <= through ? [e] : [];
-    const [y, m] = e.date.split("-").map(Number);
+    const step =
+      e.frequency === "yearly" ? 12 : e.frequency === "quarterly" ? 3 : 1;
+    const weekly = e.recurring && e.frequency === "weekly";
+    const anchor = e.anchor ?? e.date;
+    const [y, m] = anchor.split("-").map(Number);
     const claim = (date: string) => {
+      if (weekly) return Math.floor(daysBetween(anchor, date) / 7);
       const [yr, mo] = date.split("-").map(Number);
-      return (yr - y) * 12 + mo - m;
+      return Math.floor(((yr - y) * 12 + mo - m) / step);
     };
-    const start = Math.max(0, claim(from));
+    const start = Math.max(0, claim(from), claim(e.date));
     const end = Math.min(
-      claim(through),
+      claim(e.until && e.until < through ? e.until : through),
       e.recurring ? Infinity : (e.installments ?? 1) - 1,
     );
     const count = e.installments ?? 1;
     return Array.from({ length: Math.max(0, end - start + 1) }, (_, i) => {
       const index = i + start;
-      const date = month(e.date, index);
+      const date = weekly
+        ? addDays(anchor, index * 7)
+        : month(anchor, index * step);
       return {
         ...e,
         date,
@@ -161,7 +197,14 @@ export function scheduled(
           ? e.amount
           : Math.floor(e.amount / count) + (index < e.amount % count ? 1 : 0),
       };
-    }).filter((row) => row.date >= from && row.date <= through);
+    }).filter(
+      (row) =>
+        row.date >= from &&
+        row.date >= e.date &&
+        row.date <= through &&
+        (!e.until || row.date <= e.until) &&
+        !e.exceptions?.includes(row.date),
+    );
   });
 }
 export function balances(
@@ -188,16 +231,38 @@ export function balances(
   return rows
     .filter(
       (e) =>
-        e.date <= through &&
+        (e.balanceFrom ?? e.date) <= through &&
         ["account", "card", "deposit", "investment"].includes(e.kind),
     )
     .map((e) => {
       const movements = e.kind === "card" ? debtFlows : flows;
+      const adjustment = rows
+        .filter(
+          (row) =>
+            row.kind === "adjustment" &&
+            row.target === e.id &&
+            row.date <= through,
+        )
+        .sort(
+          (a, b) =>
+            b.date.localeCompare(a.date) ||
+            (b.createdAt ?? 0) - (a.createdAt ?? 0),
+        )[0];
+      const opening = adjustment?.amount ?? e.amount;
+      const openingDate = adjustment?.date ?? e.balanceFrom;
       const balance =
         e.kind === "investment"
-          ? market(e)
-          : e.amount +
+          ? (investmentAt(rows, e, through) ?? 0)
+          : opening +
             sum(movements, (f) => {
+              if (
+                openingDate &&
+                (f.date < openingDate ||
+                  (adjustment &&
+                    f.date === openingDate &&
+                    (f.createdAt ?? 0) <= (adjustment.createdAt ?? 0)))
+              )
+                return 0;
               if (e.kind === "card")
                 return f.source === e.id && f.kind === "expense"
                   ? f.amount
@@ -214,7 +279,13 @@ export function balances(
                   : 0)
               );
             });
-      return { ...e, balance };
+      return {
+        ...e,
+        ...(e.kind === "investment" && !e.manual
+          ? holding(rows, e, through)
+          : {}),
+        balance,
+      };
     });
 }
 export function totals(rows: Data, from: string, to: string) {
@@ -281,7 +352,7 @@ export function validateEntry(e: Entry) {
     const value = e[key];
     if (
       (value !== undefined || key === "amount") &&
-      (!Number.isSafeInteger(value) || value! < 0)
+      (!Number.isSafeInteger(value) || (e.kind !== "adjustment" && value! < 0))
     )
       throw new Error("Tutar geçersiz.");
   }
@@ -302,7 +373,7 @@ export function validateEntry(e: Entry) {
     (e.tax ?? 0) > 100 ||
     (e.rate ?? 0) > 1000 ||
     (e.days ?? 0) > 36500 ||
-    (e.excluded ?? 0) > e.amount
+    (e.kind === "deposit" && (e.excluded ?? 0) > e.amount)
   )
     throw new Error("Mevduat bilgileri sınır dışında.");
   for (const value of [e.cutDay, e.dueDay])
@@ -311,6 +382,8 @@ export function validateEntry(e: Entry) {
       (!Number.isInteger(value) || value < 1 || value > 31)
     )
       throw new Error("Ayın günü 1–31 arasında olmalı.");
+  if (e.kind === "deposit" && e.compound && Number.isInteger(e.days ?? 0))
+    interest(e, Math.max(3650, e.days ?? 0));
   if (e.days !== undefined && !Number.isInteger(e.days))
     throw new Error("Vade tam gün olarak girilmeli.");
   if (
@@ -326,15 +399,46 @@ export function validateEntry(e: Entry) {
     throw new Error("Tutar sıfırdan büyük olmalı.");
   if (
     e.kind === "investment" &&
+    !e.manual &&
     (!(e.units! > 0) ||
       e.cost === undefined ||
       !Number.isSafeInteger(market(e)) ||
       !Number.isSafeInteger(basis(e)))
   )
     throw new Error("Yatırım adedi veya maliyeti geçersiz.");
+  if (
+    e.kind === "trade" &&
+    (!e.units || !e.amount || !["Alım", "Satım"].includes(e.category ?? ""))
+  )
+    throw new Error("Yatırım hareketi için pozitif adet ve tutar girin.");
   if (e.kind === "goal" && (e.saved ?? 0) > e.amount)
     throw new Error("Birikim hedefi aşmamalı.");
-  for (const value of [e.source, e.target, e.category])
+  for (const date of [e.until, e.priceDate, e.balanceFrom, e.anchor]) {
+    if (date !== undefined && (typeof date !== "string" || !dateValid(date)))
+      throw new Error("Tarih geçersiz.");
+  }
+  if (
+    e.frequency !== undefined &&
+    (!e.recurring ||
+      !["weekly", "monthly", "quarterly", "yearly"].includes(e.frequency))
+  )
+    throw new Error("Tekrar sıklığı geçersiz.");
+  if (
+    e.exceptions !== undefined &&
+    (!e.recurring ||
+      !Array.isArray(e.exceptions) ||
+      e.exceptions.some((d) => typeof d !== "string" || !dateValid(d)))
+  )
+    throw new Error("Tekrar istisnası geçersiz.");
+  if (
+    e.createdAt !== undefined &&
+    (!Number.isSafeInteger(e.createdAt) || e.createdAt < 0)
+  )
+    throw new Error("Kayıt zamanı geçersiz.");
+  for (const value of [e.fixed, e.compound, e.manual])
+    if (value !== undefined && typeof value !== "boolean")
+      throw new Error("Kayıt seçeneği geçersiz.");
+  for (const value of [e.source, e.target, e.category, e.bank, e.color, e.icon])
     if (value !== undefined && typeof value !== "string")
       throw new Error("Kayıt bağlantısı geçersiz.");
   if (
@@ -369,12 +473,33 @@ export function validateData(rows: Data) {
     if (lookup.has(e.id)) throw new Error("Yedekte yinelenen kayıt var.");
     lookup.set(e.id, e.kind);
   }
+  const manual = rows.filter((e) => e.kind === "investment" && e.manual);
+  if (manual.length && rows.filter((e) => e.kind === "investment").length > 1)
+    throw new Error(
+      "Toplam portföy veya ayrıntılı takip yöntemlerinden yalnızca birini kullanın.",
+    );
+  const interestKeys = new Set<string>();
   for (const e of rows) {
+    if (
+      e.kind === "income" &&
+      e.category === "Faiz geliri" &&
+      e.target &&
+      e.paid !== false
+    ) {
+      const key = JSON.stringify([e.target, e.date, e.amount]);
+      if (interestKeys.has(key))
+        throw new Error("Aynı faiz tahsilatı zaten kayıtlı.");
+      interestKeys.add(key);
+    }
     const source = lookup.get(e.source ?? "");
     const target = lookup.get(e.target ?? "");
     const cashLike = (kind: Kind | undefined) =>
       kind === "account" || kind === "deposit";
     if (
+      (e.kind === "adjustment" && target !== "account") ||
+      (["valuation", "trade"].includes(e.kind) && target !== "investment") ||
+      (e.kind === "trade" &&
+        rows.some((asset) => asset.id === e.target && asset.manual)) ||
       (e.kind === "income" && e.target && !cashLike(target)) ||
       (e.kind === "expense" &&
         e.source &&
@@ -387,6 +512,18 @@ export function validateData(rows: Data) {
     )
       throw new Error("İşlem için geçerli hesapları seçin.");
   }
+  for (const asset of rows.filter(
+    (e) => e.kind === "investment" && !e.manual,
+  )) {
+    if (
+      rows.some(
+        (e) =>
+          e.kind === "trade" && e.target === asset.id && e.date < asset.date,
+      )
+    )
+      throw new Error("Hareket tarihi yatırımın başlangıcından önce olamaz.");
+    holding(rows, asset, "9999-12-31");
+  }
   return rows;
 }
 export function backup(raw: string): Data {
@@ -394,4 +531,180 @@ export function backup(raw: string): Data {
   if (value?.version !== 1 || !Array.isArray(value.records))
     throw new Error("Finans360 yedek biçimi geçersiz.");
   return validateData(value.records);
+}
+
+export const daysBetween = (from: string, to: string) =>
+  (Date.parse(to) - Date.parse(from)) / 86400000;
+export const monthEnd = (date: string) =>
+  addDays(month(date.slice(0, 7) + "-01", 1), -1);
+export const dateInMonth = (date: string, num: number) =>
+  date.slice(0, 8) +
+  String(Math.min(num, Number(monthEnd(date).slice(-2)))).padStart(2, "0");
+export const nextDayOfMonth = (date: string, num: number) => {
+  const selected = dateInMonth(date, num);
+  return selected >= date ? selected : dateInMonth(month(date, 1), num);
+};
+export const statusOf = (e: Entry, date: string) =>
+  completed(e) && e.date <= date
+    ? "paid"
+    : !completed(e) && e.date < date
+      ? "late"
+      : "pending";
+export function holding(rows: Data, asset: Entry, date: string) {
+  let units = asset.units ?? 0;
+  let total = units * (asset.cost ?? 0);
+  const trades = rows
+    .filter(
+      (e) => e.kind === "trade" && e.target === asset.id && e.date <= date,
+    )
+    .sort(
+      (a, b) =>
+        a.date.localeCompare(b.date) || (a.createdAt ?? 0) - (b.createdAt ?? 0),
+    );
+  for (const trade of trades) {
+    const quantity = trade.units ?? 0;
+    if (trade.category === "Alım") {
+      units += quantity;
+      total += trade.amount;
+    } else {
+      if (quantity > units + 1e-9)
+        throw new Error("Satış adedi eldeki adedi aşıyor.");
+      total = units > 0 ? (total * Math.max(0, units - quantity)) / units : 0;
+      units = Math.max(0, units - quantity);
+    }
+  }
+  return { units, cost: units ? total / units : 0 };
+}
+export const investmentAt = (rows: Data, e: Entry, date: string) => {
+  const history = rows
+    .filter(
+      (record) =>
+        record.kind === "valuation" &&
+        record.target === e.id &&
+        record.date <= date,
+    )
+    .sort(
+      (a, b) =>
+        b.date.localeCompare(a.date) || (b.createdAt ?? 0) - (a.createdAt ?? 0),
+    );
+  const priceDate = e.priceDate ?? day();
+  if (date >= priceDate && (!history.length || priceDate >= history[0].date))
+    return market(e.manual ? e : { ...e, ...holding(rows, e, date) });
+  return history[0]?.amount;
+};
+export const isFixed = (e: Entry) =>
+  e.fixed ??
+  Boolean(
+    e.recurring || ["Kira", "Aidat", "Abonelikler"].includes(e.category ?? ""),
+  );
+export function cardObligations(rows: Data, asOf: string, through: string) {
+  return balances(rows, asOf).flatMap((card) => {
+    if (card.kind !== "card" || !card.dueDay || card.balance <= 0) return [];
+    const thisDue = dateInMonth(asOf, card.dueDay);
+    const due =
+      card.statement !== undefined &&
+      thisDue < asOf &&
+      card.cutDay !== undefined &&
+      nextDayOfMonth(asOf, card.cutDay) < nextDayOfMonth(asOf, card.dueDay)
+        ? thisDue
+        : nextDayOfMonth(asOf, card.dueDay);
+    if (due > through) return [];
+    const cutoff =
+      card.cutDay && card.cutDay <= card.dueDay
+        ? dateInMonth(due, card.cutDay)
+        : dateInMonth(month(due, -1), card.cutDay ?? 1);
+    const paid = sum(
+      scheduled(rows, asOf, cutoff).filter(
+        (e) => e.kind === "payment" && e.target === card.id && completed(e),
+      ),
+      (e) => e.amount,
+    );
+    const amount = Math.max(
+      0,
+      Math.min(
+        card.balance,
+        card.statement === undefined ? card.balance : card.statement - paid,
+      ),
+    );
+    return amount ? [{ id: card.id, date: due, amount }] : [];
+  });
+}
+export function availableUntilSalary(
+  rows: Data,
+  date: string,
+  salaryDay: number,
+) {
+  const salary = nextDayOfMonth(date, salaryDay);
+  const days = Math.max(1, daysBetween(date, salary));
+  const current = balances(rows, date);
+  const cash = sum(
+    current.filter((e) => e.kind === "account"),
+    (e) => e.balance,
+  );
+  const bills = scheduled(rows, salary).filter(
+    (e) =>
+      e.kind === "expense" &&
+      statusOf(e, date) !== "paid" &&
+      (isFixed(e) || !completed(e)) &&
+      current.find((a) => a.id === e.source)?.kind !== "card",
+  );
+  const cardDue = sum(cardObligations(rows, date, salary), (e) => e.amount);
+  const required = sum(bills, (e) => e.amount) + cardDue;
+  return {
+    salary,
+    days,
+    required,
+    remaining: cash - required,
+    daily: Math.floor((cash - required) / days),
+  };
+}
+export function reviseOccurrence(
+  rows: Data,
+  template: Entry,
+  date: string,
+  revision: Entry,
+  scope: "one" | "future",
+) {
+  const exceptionDates = template.exceptions ?? [];
+  if (scope === "one")
+    return [
+      ...rows.map((e) =>
+        e.id === template.id
+          ? { ...e, exceptions: [...new Set([...exceptionDates, date])] }
+          : e,
+      ),
+      {
+        ...revision,
+        recurring: undefined,
+        frequency: undefined,
+        until: undefined,
+        anchor: undefined,
+        occurrenceStatus: undefined,
+        exceptions: undefined,
+      },
+    ];
+  const continuation = {
+    ...revision,
+    until: revision.recurring ? template.until : undefined,
+    anchor:
+      revision.recurring &&
+      revision.date === date &&
+      (revision.frequency ?? "monthly") === (template.frequency ?? "monthly")
+        ? (template.anchor ?? template.date)
+        : undefined,
+    occurrenceStatus: revision.recurring
+      ? template.occurrenceStatus
+      : undefined,
+    exceptions: revision.recurring
+      ? exceptionDates.filter((d) => d >= date)
+      : undefined,
+  };
+  return [
+    ...rows
+      .filter((e) => e.id !== template.id || e.date < date)
+      .map((e) =>
+        e.id === template.id ? { ...e, until: addDays(date, -1) } : e,
+      ),
+    continuation,
+  ];
 }

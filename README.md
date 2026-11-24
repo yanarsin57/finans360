@@ -22,3 +22,16 @@ Finans360, harcamaları, gelirleri, hesapları, kredi kartlarını, mevduatı ve
 ## Geliştirme
 
 Node.js 24 ile `npm ci`, `npm test` ve `npm run build` çalıştırın. Geliştirme sunucusu için `npm run dev` kullanın. Üretim derlemesi `dist/` altında ve GitHub Pages için `/finans360/` yolundadır.
+
+## Finans360 2.0
+
+- Özet ekranındaki ay seçici, dönem bütçesini değiştirir. Üstteki güncel varlık kartı cihazın bugünkü tarihini kullanır. Maaş gününü **Ayarlar → Bütçe ayarları** bölümünde belirleyin.
+- Bir banka hesabında **Açılış bakiyesi tarihi** gün başındaki bakiyeyi ifade eder. Önceki işlemler raporlarda görünür. Daha sonra **Bakiyeyi düzelt** ile yeni bir mutabakat kaydı ekleyebilirsiniz. V1 hesaplarında bu alan boşsa eski bakiye davranışı korunur.
+- Tekrarlanan bir işlemi açtığınızda **Yalnızca bu dönem** ya da **Bu dönem ve sonrakiler** seçeneğini kullanın. Faturanın durumunu takvim veya işlem listesinde değiştirebilirsiniz.
+- Yatırımda toplam veya ayrıntılı takipten birini kullanın. Güncel fiyatın tarihini girin ve geçmiş dönemler için ayrı değerleme kaydı ekleyin. Alım ve satımlar adedi ve ağırlıklı maliyeti değiştirir. Banka bakiyesine yansımasını istiyorsanız banka kaydını ayrıca girin. Geçmişte bütün pozisyonların değeri bilinmiyorsa grafik o dönemi boş bırakır.
+- Mevduat getirileri varsayılan olarak 365 günlük yıl üzerinden hesaplanır. Bileşik modda brüt faiz günlük bileşir ve stopaj kazanç üzerinde uygulanır. Bankanızın gerçek hesabı farklı olabilir. Tahsil edilen tutarı ayrı gelir olarak kaydedin.
+- Ekstre borcunu bankanın bildirdiği tutara göre güncelleyin. Kart ödemesi harcamaya eklenmez. Kalan ekstre tahmini, kesimden sonra kaydedilen ödemeleri kullanır.
+- **Raporlar** ekranında seçili dönemi Excel veya PDF olarak indirebilirsiniz. PDF yazı tipi uygulama dosyalarıyla birlikte çevrimdışı önbelleğe alınır.
+- İsteğe bağlı PIN ekranı arka plana geçişte ve üç dakika kullanılmadığında kilitlenir. PIN doğrulaması cihazda yapılır. Bu ekran IndexedDB kayıtlarını şifrelemez ve Face ID kullanılmaz. PIN ekranı ve tema ayarları yedek dosyasına dahil edilmez.
+- Şifreli JSON yedeklerinde PBKDF2 ve AES-GCM kullanılır. Dosya kişisel finans kayıtlarını içerir. Parola unutulursa şifreli dosya kurtarılamaz.
+- Güncelleme geldiğinde **Güncelle** düğmesi açık kayıt formu kapatıldıktan sonra kullanılabilir. Eski sürümden geçişte güncelleme görünmezse uygulamayı kapatıp yeniden açın. Mevcut uygulama adresi, PWA kimliği ve IndexedDB alanı korunur.
