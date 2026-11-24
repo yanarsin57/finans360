@@ -1,7 +1,14 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import {
-  Activity,
+  Target,
+  ShoppingBasket,
+  Zap,
+  Bus,
+  HeartPulse,
+  Utensils,
+  Wifi,
+  Tag,
   ArrowDownLeft,
   ArrowUpRight,
   CalendarDays,
@@ -62,6 +69,22 @@ import {
   type Kind,
 } from "./model.ts";
 import { load, update, type Mode } from "./storage.ts";
+import { MonthPicker } from "./MonthPicker.tsx";
+import { InterestComparison } from "./InterestComparison.tsx";
+import { exportPdf, report } from "./report.ts";
+import { protect, reveal } from "./device.ts";
+import {
+  availableUntilSalary,
+  cardObligations,
+  nextDayOfMonth,
+  dateInMonth,
+  daysBetween,
+  isFixed,
+  investmentAt,
+  monthEnd,
+  reviseOccurrence,
+  statusOf,
+} from "./model.ts";
 import "./style.css";
 
 const today = day();
@@ -248,16 +271,19 @@ function Editor({
   close,
   save,
   remove,
+  occurrence,
 }: {
   entry: Entry;
   rows: Data;
   close: () => void;
-  save: (entry: Entry) => Promise<void>;
+  save: (entry: Entry, scope: "one" | "future") => Promise<void>;
+  occurrence?: boolean;
   remove: (entry: Entry) => Promise<void>;
 }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const { kind } = entry;
+  const [manual, setManual] = useState(entry.manual ?? false);
   const bank = rows
     .filter((e) => e.kind === "account")
     .map((e) => [e.id, e.name] as [string, string]);
@@ -295,34 +321,61 @@ function Editor({
     const number = (key: string) =>
       str(key) ? Number(str(key).replace(",", ".")) : undefined;
     void execute(async () => {
-      await save({
-        id: entry.id,
-        kind,
-        name: str("name"),
-        date: str("date") || entry.date,
-        amount: amount("amount") ?? 0,
-        category: str("category") || undefined,
-        source: str("source") || undefined,
-        target: str("target") || undefined,
-        recurring: data.has("recurring") || undefined,
-        occurrenceStatus: data.has("recurring")
-          ? entry.occurrenceStatus
-          : undefined,
-        paid: isFlow(entry) ? data.has("paid") : undefined,
-        installments: number("installments"),
-        limit: amount("limit"),
-        statement: amount("statement"),
-        cutDay: number("cutDay"),
-        dueDay: number("dueDay"),
-        rate: number("rate"),
-        tax: number("tax"),
-        excluded: amount("excluded"),
-        days: number("days"),
-        units: number("units"),
-        price: amount("price"),
-        cost: amount("cost"),
-        saved: amount("saved"),
-      });
+      const frequency = str("frequency") as Entry["frequency"];
+      await save(
+        {
+          ...entry,
+          id: entry.id,
+          kind,
+          name: str("name"),
+          date: str("date") || entry.date,
+          amount:
+            kind === "adjustment" && str("amount").startsWith("-")
+              ? -parseMoney(str("amount").slice(1))
+              : (amount("amount") ?? 0),
+          category: str("category") || undefined,
+          source:
+            str("source") ||
+            (entry.source && !data.has("source") && entry.source) ||
+            undefined,
+          target:
+            str("target") ||
+            (entry.target && !data.has("target") && entry.target) ||
+            undefined,
+          recurring: Boolean(frequency) || undefined,
+          frequency: frequency || undefined,
+          anchor: frequency ? entry.anchor : undefined,
+          exceptions: frequency ? entry.exceptions : undefined,
+          until: frequency ? entry.until : undefined,
+          createdAt: entry.createdAt ?? Date.now(),
+          bank: str("bank") || undefined,
+          color: str("color") || undefined,
+          icon: str("icon") || undefined,
+          fixed: kind === "expense" ? str("fixed") === "fixed" : undefined,
+          compound: kind === "deposit" ? data.has("compound") : undefined,
+          manual: kind === "investment" ? manual : undefined,
+          priceDate:
+            kind === "investment" ? str("priceDate") || today : undefined,
+          balanceFrom:
+            kind === "account" ? str("balanceFrom") || undefined : undefined,
+          occurrenceStatus: frequency ? entry.occurrenceStatus : undefined,
+          paid: isFlow(entry) ? data.has("paid") : undefined,
+          installments: number("installments"),
+          limit: amount("limit"),
+          statement: amount("statement"),
+          cutDay: number("cutDay"),
+          dueDay: number("dueDay"),
+          rate: number("rate"),
+          tax: number("tax"),
+          excluded: amount("excluded"),
+          days: number("days"),
+          units: number("units"),
+          price: amount("price"),
+          cost: amount("cost"),
+          saved: amount("saved"),
+        },
+        str("scope") === "future" ? "future" : "one",
+      );
     });
   };
   return (
@@ -353,7 +406,7 @@ function Editor({
               "text",
               true,
             )}
-            {kind !== "investment" &&
+            {(kind !== "investment" || manual) &&
               field(
                 "amount",
                 (
@@ -367,7 +420,7 @@ function Editor({
                 )[kind] ?? "Tutar (₺)",
                 tl(
                   entry.amount ||
-                    (["account", "card", "deposit"].includes(kind)
+                    (["account", "card", "deposit", "adjustment"].includes(kind)
                       ? 0
                       : undefined),
                 ),
@@ -386,6 +439,80 @@ function Editor({
                 "date",
                 true,
               )}
+            {["account", "card", "deposit"].includes(kind) &&
+              field("bank", "Banka adı", entry.bank)}
+            {kind === "account" && (
+              <>
+                {field(
+                  "balanceFrom",
+                  "Açılış bakiyesi tarihi (gün başı)",
+                  entry.balanceFrom,
+                  "date",
+                )}
+                {select(
+                  "color",
+                  "Hesap rengi",
+                  entry.color,
+                  [
+                    ["green", "Zümrüt"],
+                    ["blue", "Mavi"],
+                    ["purple", "Mor"],
+                  ],
+                  "Varsayılan",
+                )}
+                {select(
+                  "icon",
+                  "Hesap simgesi",
+                  entry.icon,
+                  [
+                    ["bank", "Banka"],
+                    ["cash", "Nakit"],
+                  ],
+                  "Varsayılan",
+                )}
+                <p className="form-note">
+                  Bakiye tarihinden önceki hareketler raporda görünür. Hesap
+                  bakiyesi, seçilen günün başındaki tutarla hesaplanır.
+                </p>
+              </>
+            )}
+            {kind === "expense" &&
+              select(
+                "fixed",
+                "Gider sınıfı",
+                isFixed(entry) ? "fixed" : "variable",
+                [
+                  ["fixed", "Sabit"],
+                  ["variable", "Değişken"],
+                ],
+              )}
+            {kind === "investment" && (
+              <label>
+                Takip yöntemi
+                <select
+                  value={manual ? "manual" : "detail"}
+                  onChange={(e) => setManual(e.target.value === "manual")}
+                >
+                  <option value="detail">Ayrıntılı</option>
+                  <option value="manual">Toplam portföy</option>
+                </select>
+              </label>
+            )}
+            {kind === "investment" &&
+              field(
+                "priceDate",
+                "Değerleme tarihi",
+                entry.priceDate ?? today,
+                "date",
+                true,
+              )}
+            {kind === "trade" &&
+              select("category", "Hareket", entry.category, [
+                ["Alım", "Alım"],
+                ["Satım", "Satım"],
+              ])}
+            {kind === "trade" &&
+              field("units", "Adet", entry.units, "text", true)}
             {kind === "income" && (
               <>
                 {select(
@@ -453,6 +580,7 @@ function Editor({
             )}
             {kind === "deposit" && (
               <>
+                {check("compound", "Günlük bileşik faiz", entry.compound)}
                 {field("rate", "Yıllık faiz (%)", entry.rate, "text", true)}
                 {field("tax", "Stopaj (%)", entry.tax, "text", true)}
                 {field(
@@ -463,13 +591,15 @@ function Editor({
                 {field("days", "Vade süresi (gün)", entry.days)}
               </>
             )}
-            {kind === "investment" && (
+            {kind === "investment" && !manual && (
               <>
                 {select(
                   "category",
                   "Yatırım türü",
                   entry.category,
-                  ["Hisse senedi", "Altın", "Döviz"].map((v) => [v, v]),
+                  ["Hisse senedi", "Altın", "Döviz", "Yatırım fonu"].map(
+                    (v) => [v, v],
+                  ),
                 )}
                 {field("units", "Adet", entry.units, "text", true)}
                 {field(
@@ -505,7 +635,23 @@ function Editor({
                 completed(entry),
               )}
             {(kind === "income" || kind === "expense") &&
-              check("recurring", "Her ay tekrarla", entry.recurring)}
+              select(
+                "frequency",
+                "Tekrar",
+                entry.recurring ? (entry.frequency ?? "monthly") : undefined,
+                [
+                  ["weekly", "Haftalık"],
+                  ["monthly", "Aylık"],
+                  ["quarterly", "Üç aylık"],
+                  ["yearly", "Yıllık"],
+                ],
+                "Tek seferlik",
+              )}
+            {occurrence &&
+              select("scope", "Düzenle", "one", [
+                ["one", "Yalnızca bu dönem"],
+                ["future", "Bu dönem ve sonrakiler"],
+              ])}
           </div>
           {error && (
             <p role="alert" className="error">
@@ -565,6 +711,19 @@ const calendarCard = (e: Entry, from: string, to: string): Entry[] => {
   return result;
 };
 function App() {
+  const [today, setToday] = useState(day);
+  const start = today.slice(0, 7) + "-01";
+  const end = monthEnd(start);
+  useEffect(() => {
+    const refresh = () => setToday(day());
+    const timer = setInterval(refresh, 60000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, []);
+
   const [mode, setMode] = useState<Mode>("personal");
   const [rows, setRows] = useState<Data>([]);
   const [ready, setReady] = useState(false);
@@ -582,6 +741,84 @@ function App() {
   const [to, setTo] = useState(end);
   const [period, setPeriod] = useState(6);
   const [paymentFilter, setPaymentFilter] = useState("");
+  const [viewMonth, setViewMonth] = useState(start);
+  const [calendarDate, setCalendarDate] = useState(today);
+  const changeMonth = (value: string) => {
+    setViewMonth(value);
+    setCalendarDate(value === start ? today : value);
+  };
+  const [calendarList, setCalendarList] = useState(false);
+  const [search, setSearch] = useState("");
+  const [accountFilter, setAccountFilter] = useState("");
+  const [stateFilter, setStateFilter] = useState("");
+  const [fixedFilter, setFixedFilter] = useState("");
+  const [assetTab, setAssetTab] = useState("all");
+  const [occurrence, setOccurrence] = useState<Entry>();
+  const [salaryDay, setSalaryDay] = useState(() =>
+    Number(localStorage.getItem("finans360-salary") ?? 1),
+  );
+  const [interestDays, setInterestDays] = useState(32);
+  const [waiting, setWaiting] = useState<ServiceWorker>();
+  const [pin, setPin] = useState(
+    () => localStorage.getItem("finans360-lock") ?? "",
+  );
+  const [locked, setLocked] = useState(Boolean(pin));
+  const [pinInput, setPinInput] = useState("");
+  const [lockError, setLockError] = useState("");
+  useEffect(() => {
+    if (!import.meta.env.PROD || !("serviceWorker" in navigator)) return;
+    let registration: ServiceWorkerRegistration | undefined;
+    const observe = () => {
+      const installing = registration?.installing;
+      installing?.addEventListener("statechange", () => {
+        if (registration?.waiting && navigator.serviceWorker.controller)
+          setWaiting(registration.waiting);
+      });
+    };
+    navigator.serviceWorker
+      .register(import.meta.env.BASE_URL + "sw.js")
+      .then((reg) => {
+        registration = reg;
+        if (reg.waiting && navigator.serviceWorker.controller)
+          setWaiting(reg.waiting);
+        reg.addEventListener("updatefound", observe);
+        observe();
+      })
+      .catch(() => {});
+    const foreground = () => {
+      if (!document.hidden) void registration?.update().catch(() => {});
+    };
+    document.addEventListener("visibilitychange", foreground);
+    return () => {
+      registration?.removeEventListener("updatefound", observe);
+      document.removeEventListener("visibilitychange", foreground);
+    };
+  }, []);
+  useEffect(() => {
+    if (!pin || locked) return;
+    let timer: ReturnType<typeof setTimeout>;
+    const lock = () => {
+      setPinInput("");
+      setLocked(true);
+    };
+    const reset = () => {
+      clearTimeout(timer);
+      timer = setTimeout(lock, 180000);
+    };
+    const hide = () => {
+      if (document.hidden) lock();
+    };
+    reset();
+    document.addEventListener("visibilitychange", hide);
+    window.addEventListener("pointerdown", reset);
+    window.addEventListener("keydown", reset);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", hide);
+      window.removeEventListener("pointerdown", reset);
+      window.removeEventListener("keydown", reset);
+    };
+  }, [pin, locked]);
   const initial = mode === "demo" ? sample : [];
   useEffect(() => {
     let active = true;
@@ -600,6 +837,27 @@ function App() {
     };
   }, [mode]);
   useEffect(() => {
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+    const resize = () => {
+      document.documentElement.style.setProperty(
+        "--visual-height",
+        viewport.height + "px",
+      );
+      document.documentElement.style.setProperty(
+        "--visual-offset",
+        viewport.offsetTop + "px",
+      );
+    };
+    resize();
+    viewport.addEventListener("resize", resize);
+    viewport.addEventListener("scroll", resize);
+    return () => {
+      viewport.removeEventListener("resize", resize);
+      viewport.removeEventListener("scroll", resize);
+    };
+  }, []);
+  useEffect(() => {
     document.documentElement.dataset.theme = dark ? "dark" : "light";
     localStorage.setItem("finans360-theme", dark ? "dark" : "light");
   }, [dark]);
@@ -611,6 +869,7 @@ function App() {
     );
   const newEntry = (kind: Kind, defaults: Partial<Entry> = {}) => {
     setChooser(false);
+    setOccurrence(undefined);
     setEntry({
       id: crypto.randomUUID(),
       kind,
@@ -627,12 +886,42 @@ function App() {
   };
   const fmt = (amount: number) => (visible ? money(amount) : "••••");
   const summary = snapshot(rows, today);
-  const monthly = totals(rows, start, today);
-  const yearly = totals(rows, today.slice(0, 4) + "-01-01", today);
-  const forecast = snapshot(rows, end, true, start).cash;
+  const selectedMonthEnd = monthEnd(viewMonth);
+  const monthly = totals(
+    rows,
+    viewMonth,
+    selectedMonthEnd < today ? selectedMonthEnd : today,
+  );
+  const monthFlows = scheduled(rows, selectedMonthEnd, viewMonth);
+  const pending = monthFlows.filter((e) => statusOf(e, today) !== "paid");
+  const monthlyExpenses = monthFlows.filter(
+    (e) => e.kind === "expense" && statusOf(e, today) === "paid",
+  );
+  const fixedSpent = sum(monthlyExpenses.filter(isFixed), (e) => e.amount);
+  const salary = availableUntilSalary(rows, today, salaryDay);
+  const current = balances(rows, today);
+  const deposits = sum(
+    current.filter((e) => e.kind === "deposit"),
+    (e) => e.balance,
+  );
+  const investments = sum(
+    current.filter((e) => e.kind === "investment"),
+    (e) => e.balance,
+  );
+  const cashOnHand = sum(
+    current.filter((e) => e.kind === "account" && e.icon === "cash"),
+    (e) => e.balance,
+  );
+  const forecast = snapshot(
+    rows,
+    selectedMonthEnd,
+    selectedMonthEnd >= today,
+    viewMonth,
+  ).cash;
   const rangeEnd = to >= from ? to : from;
-  const selected = totals(rows, from, rangeEnd);
-  const spending = scheduled(rows, rangeEnd, from).filter(
+  const actualEnd = rangeEnd < today ? rangeEnd : today;
+  const selected = totals(rows, from, actualEnd);
+  const spending = scheduled(rows, actualEnd, from).filter(
     (e) => e.kind === "expense" && completed(e),
   );
   const byCategory = [...new Set(spending.map((e) => e.category ?? "Diğer"))]
@@ -644,22 +933,99 @@ function App() {
       ),
     }))
     .sort((a, b) => b.value - a.value);
-  const chartEnd = tab === "Raporlar" ? rangeEnd : today;
+  const chartEnd =
+    tab === "Raporlar"
+      ? actualEnd
+      : viewMonth <= today
+        ? selectedMonthEnd < today
+          ? selectedMonthEnd
+          : today
+        : today;
+  const comparisonMonth = actualEnd.slice(0, 7) + "-01";
+  const priorMonth = month(comparisonMonth, -1);
+  const priorSpend = totals(rows, priorMonth, monthEnd(priorMonth)).expense;
+  const comparisonSpend = totals(rows, comparisonMonth, actualEnd).expense;
+  const reportFixed = sum(spending.filter(isFixed), (e) => e.amount);
+  const realizedInterest = sum(
+    scheduled(rows, actualEnd, from).filter(
+      (e) =>
+        e.kind === "income" && e.category === "Faiz geliri" && completed(e),
+    ),
+    (e) => e.amount,
+  );
+  const salaryIncome = sum(
+    scheduled(rows, actualEnd, from).filter(
+      (e) => e.kind === "income" && e.category === "Maaş" && completed(e),
+    ),
+    (e) => e.amount,
+  );
+  const rent = sum(
+    spending.filter((e) => e.category === "Kira"),
+    (e) => e.amount,
+  );
+  const pct = (ratio: number) =>
+    visible
+      ? ratio.toLocaleString("tr-TR", {
+          style: "percent",
+          maximumFractionDigits: 1,
+        })
+      : "••••";
   const chartStart = chartEnd.slice(0, 7) + "-01";
   const series = Array.from({ length: period }, (_, i) => {
     const date = month(chartStart, i - period + 1),
       last = i === period - 1 ? chartEnd : addDays(month(date, 1), -1),
       t = totals(rows, date, last);
+    const history = snapshot(rows, last);
+    const hasFlows = scheduled(rows, last, date).some(completed);
+    const availableHistory =
+      rows.some(
+        (e) =>
+          (e.balanceFrom ?? e.date) <= last &&
+          ["account", "card", "deposit"].includes(e.kind),
+      ) ||
+      rows.some(
+        (e) =>
+          e.kind === "investment" &&
+          e.date <= last &&
+          investmentAt(rows, e, last) !== undefined,
+      );
+    const positions = rows
+      .filter((e) => e.kind === "investment" && e.date <= last)
+      .map((e) => investmentAt(rows, e, last));
+    const completeValuations = positions.every((value) => value !== undefined);
     return {
       name: monthLabel(date),
-      Gelir: t.income,
-      Gider: t.expense,
-      Birikim: snapshot(rows, last).assets,
+      Gelir: hasFlows ? t.income : null,
+      Gider: hasFlows ? t.expense : null,
+      Birikim: availableHistory && completeValuations ? history.assets : null,
+      Varlık: availableHistory && completeValuations ? history.net : null,
+      Borç: rows.some((e) => e.kind === "card" && e.date <= last)
+        ? history.debt
+        : null,
+      Yatırım:
+        positions.length && completeValuations
+          ? sum(positions, (v) => v ?? 0)
+          : null,
+    };
+  });
+  const projection = Array.from({ length: 12 }, (_, i) => {
+    const date = month(start, i + 1);
+    return {
+      name: monthLabel(date),
+      Birikim: snapshot(rows, monthEnd(date), true, today).net,
+      Gelir: null,
+      Gider: null,
+      Varlık: null,
+      Borç: null,
+      Yatırım: null,
     };
   });
   const upcoming = (first: string, last: string) =>
     [
-      ...scheduled(rows, last, first).filter((e) => e.kind === "expense"),
+      ...scheduled(rows, last, first).filter(
+        (e) =>
+          e.kind === "expense" || e.kind === "income" || e.kind === "payment",
+      ),
       ...rows
         .filter((e) => e.kind === "deposit" && (e.days ?? 0) > 0)
         .map((e) => ({ ...e, date: addDays(e.date, e.days!) }))
@@ -668,7 +1034,55 @@ function App() {
         .filter((e) => e.kind === "card")
         .flatMap((e) => calendarCard(e, first, last)),
     ].sort((a, b) => a.date.localeCompare(b.date));
-  const open = (e: Entry) => setEntry(rows.find((row) => row.id === e.id) ?? e);
+  const open = (e: Entry) => {
+    const original = rows.find((row) => row.id === e.id) ?? e;
+    setOccurrence(original.recurring ? e : undefined);
+    setEntry(original.recurring ? { ...e } : original);
+  };
+  const categoryIcons: Record<string, typeof Wallet> = {
+    Kira: House,
+    Aidat: Landmark,
+    "Market ve manav": ShoppingBasket,
+    Elektrik: Zap,
+    Ulaşım: Bus,
+    Sağlık: HeartPulse,
+    Yemek: Utensils,
+    İnternet: Wifi,
+    Alışveriş: Tag,
+  };
+  const stateLabels = {
+    paid: "Tamamlandı",
+    pending: "Bekliyor",
+    late: "Gecikmiş",
+  };
+  const transactions = [
+    ...scheduled(rows, rangeEnd, from),
+    ...rows.filter(
+      (e) =>
+        ["adjustment", "trade", "valuation"].includes(e.kind) &&
+        e.date >= from &&
+        e.date <= rangeEnd,
+    ),
+  ]
+    .filter(
+      (e) =>
+        (!filter || e.kind === filter) &&
+        (!category || e.category === category) &&
+        (!accountFilter ||
+          e.source === accountFilter ||
+          e.target === accountFilter) &&
+        (!stateFilter || statusOf(e, today) === stateFilter) &&
+        (!fixedFilter ||
+          (e.kind === "expense" && isFixed(e) === (fixedFilter === "fixed"))) &&
+        [e.name, e.category ?? ""]
+          .join(" ")
+          .toLocaleLowerCase("tr")
+          .includes(search.trim().toLocaleLowerCase("tr")),
+    )
+    .sort(
+      (a, b) =>
+        b.date.localeCompare(a.date) || (b.createdAt ?? 0) - (a.createdAt ?? 0),
+    );
   const row = (e: Entry, showStatus = false) => (
     <div className="entry-wrap" key={e.id + "-" + e.date + "-" + e.name}>
       <button
@@ -680,7 +1094,10 @@ function App() {
           {e.kind === "income" ? (
             <ArrowDownLeft size={20} />
           ) : e.kind === "expense" ? (
-            <ArrowUpRight size={20} />
+            (() => {
+              const Icon = categoryIcons[e.category ?? ""] ?? ArrowUpRight;
+              return <Icon size={20} />;
+            })()
           ) : (
             <CalendarDays size={19} />
           )}
@@ -689,18 +1106,28 @@ function App() {
           <strong>{e.name}</strong>
           <small>
             {e.category || labels[e.kind]} · {dateLabel(e.date)}
-            {showStatus && (e.kind === "expense" || e.kind === "income")
-              ? " · " +
-                (completed(e)
-                  ? e.kind === "income"
-                    ? "Gerçekleşti"
-                    : "Ödendi"
-                  : "Bekliyor")
-              : ""}
+            {showStatus && isFlow(e) && (
+              <>
+                {" "}
+                ·{" "}
+                <span className={"status-" + statusOf(e, today)}>
+                  {stateLabels[statusOf(e, today)]}
+                </span>
+              </>
+            )}
           </small>
         </span>
-        {isFlow(e) && (
-          <strong className={e.kind === "income" ? "positive" : ""}>
+        {(isFlow(e) ||
+          ["adjustment", "trade", "valuation"].includes(e.kind)) && (
+          <strong
+            className={
+              e.kind === "income"
+                ? "positive"
+                : e.kind === "expense"
+                  ? "negative"
+                  : ""
+            }
+          >
             {e.kind === "income" ? "+" : e.kind === "expense" ? "−" : ""}
             {fmt(e.amount)}
           </strong>
@@ -708,8 +1135,9 @@ function App() {
         <ChevronRight className="muted chevron" size={16} />
       </button>
       {showStatus &&
-        e.recurring &&
-        (e.kind === "expense" || e.kind === "income") && (
+        e.date <= today &&
+        (e.kind === "expense" || e.kind === "income" || e.kind === "payment") &&
+        !(e.installments && e.installments > 1) && (
           <button
             className="link occurrence"
             onClick={() =>
@@ -719,10 +1147,15 @@ function App() {
                     template.id === e.id
                       ? {
                           ...template,
-                          occurrenceStatus: {
-                            ...template.occurrenceStatus,
-                            [e.date]: !completed(e),
-                          },
+                          paid: template.recurring
+                            ? template.paid
+                            : !completed(e),
+                          occurrenceStatus: template.recurring
+                            ? {
+                                ...template.occurrenceStatus,
+                                [e.date]: !completed(e),
+                              }
+                            : undefined,
                         }
                       : template,
                   ),
@@ -758,7 +1191,17 @@ function App() {
     items.map(([name, value]) => (
       <div className="stat" key={name}>
         <span>{name}</span>
-        <strong>{fmt(value)}</strong>
+        <strong
+          className={
+            value < 0 || /gider|borç|açığı/i.test(name)
+              ? "negative"
+              : /gelir/i.test(name)
+                ? "positive"
+                : undefined
+          }
+        >
+          {fmt(value)}
+        </strong>
       </div>
     ));
   const range = (
@@ -782,8 +1225,27 @@ function App() {
       </label>
     </div>
   );
-  const chart = (type: "flow" | "saving" = "flow") =>
-    visible ? (
+  const chart = (
+    type:
+      "flow" | "saving" | "net" | "debt" | "investment" | "projection" = "flow",
+  ) =>
+    visible &&
+    (type === "projection"
+      ? rows.length > 0
+      : series.some(
+          (e) =>
+            e[
+              type === "net"
+                ? "Varlık"
+                : type === "debt"
+                  ? "Borç"
+                  : type === "investment"
+                    ? "Yatırım"
+                    : type === "saving"
+                      ? "Birikim"
+                      : "Gelir"
+            ] !== null,
+        )) ? (
       <div
         className="chart"
         aria-label={
@@ -807,7 +1269,18 @@ function App() {
                 tickLine={false}
                 stroke="var(--muted)"
               />
-              <YAxis hide />
+              <YAxis
+                width={57}
+                tickFormatter={(v) =>
+                  new Intl.NumberFormat("tr-TR", {
+                    notation: "compact",
+                    style: "currency",
+                    currency: "TRY",
+                    maximumFractionDigits: 1,
+                  }).format(v / 100)
+                }
+                tick={{ fontSize: 11, fill: "var(--muted)" }}
+              />
               <Tooltip
                 formatter={(v) => money(Number(v))}
                 contentStyle={{
@@ -824,18 +1297,45 @@ function App() {
               />
               <Bar
                 dataKey="Gider"
-                fill="#739cff"
+                fill="#f17f8a"
                 radius={[5, 5, 0, 0]}
                 maxBarSize={25}
               />
             </BarChart>
           ) : (
-            <AreaChart data={series}>
+            <AreaChart data={type === "projection" ? projection : series}>
               <XAxis dataKey="name" stroke="var(--muted)" />
-              <YAxis hide />
-              <Tooltip formatter={(v) => money(Number(v))} />
+              <YAxis
+                width={57}
+                tickFormatter={(v) =>
+                  new Intl.NumberFormat("tr-TR", {
+                    notation: "compact",
+                    style: "currency",
+                    currency: "TRY",
+                    maximumFractionDigits: 1,
+                  }).format(v / 100)
+                }
+                tick={{ fontSize: 11, fill: "var(--muted)" }}
+              />
+              <Tooltip
+                formatter={(v) => money(Number(v))}
+                contentStyle={{
+                  background: "var(--panel)",
+                  color: "var(--text)",
+                  border: "1px solid var(--line)",
+                }}
+                itemStyle={{ color: "var(--text)" }}
+              />
               <Area
-                dataKey="Birikim"
+                dataKey={
+                  type === "net"
+                    ? "Varlık"
+                    : type === "debt"
+                      ? "Borç"
+                      : type === "investment"
+                        ? "Yatırım"
+                        : "Birikim"
+                }
                 stroke="#55d39d"
                 fill="#55d39d"
                 fillOpacity={0.2}
@@ -845,17 +1345,34 @@ function App() {
         </ResponsiveContainer>
       </div>
     ) : (
-      <p className="empty">Tutarlar gizli.</p>
+      <p className="empty">{visible ? "Veri yok." : "Tutarlar gizli."}</p>
     );
   const pie = (data: { name: string; value: number }[]) =>
     visible && data.some((e) => e.value > 0) ? (
       <div className="chart">
         <ResponsiveContainer width="100%" height="100%">
           <PieChart>
+            <text
+              x="50%"
+              y="46%"
+              textAnchor="middle"
+              fill="var(--text)"
+              fontSize="14"
+            >
+              {fmt(sum(data, (e) => e.value))}
+            </text>
             <Pie
               data={data}
               dataKey="value"
               nameKey="name"
+              cy="46%"
+              label={({ percent }) =>
+                percent === undefined
+                  ? ""
+                  : (percent * 100).toLocaleString("tr-TR", {
+                      maximumFractionDigits: 0,
+                    }) + "%"
+              }
               innerRadius="42%"
               outerRadius="67%"
             >
@@ -863,7 +1380,15 @@ function App() {
                 <Cell key={e.name + i} fill={colors[i % colors.length]} />
               ))}
             </Pie>
-            <Tooltip formatter={(v) => money(Number(v))} />
+            <Tooltip
+              formatter={(v) => money(Number(v))}
+              contentStyle={{
+                background: "var(--panel)",
+                color: "var(--text)",
+                border: "1px solid var(--line)",
+              }}
+              itemStyle={{ color: "var(--text)" }}
+            />
             <Legend />
           </PieChart>
         </ResponsiveContainer>
@@ -883,16 +1408,68 @@ function App() {
       (x) => x.amount,
     ),
   }));
-  const portfolio = rows.filter((e) => e.kind === "investment");
+  const portfolio = current.filter((e) => e.kind === "investment");
   const portfolioData = [
     ...new Set(portfolio.map((e) => e.category ?? "Diğer")),
   ].map((name) => ({
     name,
     value: sum(
       portfolio.filter((e) => (e.category ?? "Diğer") === name),
-      market,
+      (e) => e.balance,
     ),
   }));
+  const calendarStart = viewMonth;
+  const calendarEnd = monthEnd(calendarStart);
+  const firstWeekday = (new Date(calendarStart + "T12:00:00").getDay() + 6) % 7;
+  const events = upcoming(calendarStart, calendarEnd);
+  const unfulfilled = (first: string, last: string) =>
+    upcoming(first, last).filter(
+      (e) => e.kind === "expense" && statusOf(e, today) !== "paid",
+    );
+  const upcomingPay = (days: number) => {
+    const until = addDays(today, days - 1);
+    const openBills = unfulfilled(today, until).filter(
+      (e) => rows.find((a) => a.id === e.source)?.kind !== "card",
+    );
+    return (
+      sum(openBills, (e) => e.amount) +
+      sum(
+        cardObligations(rows, today, until).filter((e) => e.date >= today),
+        (e) => e.amount,
+      )
+    );
+  };
+  const overduePay =
+    sum(
+      scheduled(rows, today).filter(
+        (e) =>
+          e.kind === "expense" &&
+          statusOf(e, today) === "late" &&
+          rows.find((a) => a.id === e.source)?.kind !== "card",
+      ),
+      (e) => e.amount,
+    ) +
+    sum(
+      cardObligations(rows, today, today).filter((e) => e.date < today),
+      (e) => e.amount,
+    );
+  const reportExcel = () =>
+    run(async () => {
+      const { default: ExcelJS } = await import("exceljs");
+      const book = new ExcelJS.Workbook();
+      const sheet = book.addWorksheet("Dönem raporu");
+      for (const fields of report(rows, from, actualEnd)) sheet.addRow(fields);
+      const detail = book.addWorksheet("Kategori harcamaları");
+      detail.addRow(["Kategori", "Gerçekleşen gider (₺)"]);
+      for (const item of byCategory)
+        detail.addRow([item.name, item.value / 100]);
+      download(
+        "Finans360-rapor.xlsx",
+        new Blob([await book.xlsx.writeBuffer()], {
+          type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        }),
+      );
+    });
   const chooseKinds =
     tab === "Varlıklar"
       ? (["account", "card", "deposit", "investment", "goal"] as const)
@@ -909,18 +1486,64 @@ function App() {
           "budget",
         ] as const);
   const completedExpenses = scheduled(rows, today).filter(completed);
+  if (locked)
+    return (
+      <main className="lock-screen">
+        <form
+          className="panel"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void reveal(pinInput, pin)
+              .then((value) => {
+                if (value !== "Finans360") throw new Error();
+                setLocked(false);
+                setPinInput("");
+                setLockError("");
+              })
+              .catch(() => setLockError("PIN yanlış."));
+          }}
+        >
+          <h1>Finans360 kilitli</h1>
+          <label>
+            PIN
+            <input
+              autoComplete="off"
+              type="password"
+              inputMode="numeric"
+              value={pinInput}
+              onChange={(e) => setPinInput(e.target.value)}
+              required
+            />
+          </label>
+          <button className="primary">Kilidi aç</button>
+          {lockError && <p className="error">{lockError}</p>}
+        </form>
+      </main>
+    );
   return (
     <div className="shell">
       <header className="top">
         <button className="brand" onClick={() => navigate("Özet")}>
           <span className="brand-icon">
-            <Activity size={23} />
+            <img
+              src={import.meta.env.BASE_URL + "icon-192.png"}
+              alt=""
+              width={36}
+              height={36}
+            />
           </span>
           <span>
             Finans<span>360</span>
           </span>
         </button>
         <div className="top-controls">
+          <button
+            className="icon"
+            aria-label={visible ? "Tutarları gizle" : "Tutarları göster"}
+            onClick={() => setVisible(!visible)}
+          >
+            {visible ? <Eye size={19} /> : <EyeOff size={19} />}
+          </button>
           {mode === "demo" && <span className="demo">Örnek veri</span>}
           <button
             className="icon"
@@ -963,6 +1586,25 @@ function App() {
           </p>
         )}
         {!ready && <p className="empty">Yerel kayıtlar yükleniyor…</p>}
+        {waiting && (
+          <div className="notice">
+            <span>Yeni sürüm hazır.</span>
+            <button
+              className="link"
+              disabled={Boolean(entry || chooser)}
+              onClick={() => {
+                navigator.serviceWorker.addEventListener(
+                  "controllerchange",
+                  () => location.reload(),
+                  { once: true },
+                );
+                waiting.postMessage("FINANS360_ACTIVATE");
+              }}
+            >
+              Güncelle
+            </button>
+          </div>
+        )}
         {ready && tab === "Özet" && (
           <>
             <section className="hero">
@@ -970,19 +1612,14 @@ function App() {
                 <span>
                   <Wallet size={17} /> Net finansal varlık
                 </span>
-                <button
-                  className="icon hero-icon"
-                  aria-label={visible ? "Tutarları gizle" : "Tutarları göster"}
-                  onClick={() => setVisible(!visible)}
-                >
-                  {visible ? <Eye size={20} /> : <EyeOff size={20} />}
-                </button>
+                <small>Güncel bakiyeler</small>
               </div>
               <div className="net">{fmt(summary.net)}</div>
               <div className="hero-stats">
                 {stats([
                   ["Kullanılabilir nakit", summary.cash],
-                  ["Birikim ve yatırım", summary.assets],
+                  ["Mevduat", deposits],
+                  ["Yatırımlar", investments],
                   ["Kredi kartı borcu", summary.debt],
                 ])}
               </div>
@@ -995,11 +1632,43 @@ function App() {
                 <ArrowUpRight size={20} /> Gider ekle
               </button>
             </div>
+            <section className="panel">
+              <h2>Aylık bütçe</h2>
+              <MonthPicker value={viewMonth} onChange={changeMonth} />
+            </section>
             <div className="metrics">
               {stats([
-                ["Aylık gelir", monthly.income],
-                ["Aylık gider", monthly.expense],
-                ["Ay sonu tahmini nakit", forecast],
+                ["Gerçekleşen gelir", monthly.income],
+                ["Gerçekleşen gider", monthly.expense],
+                [
+                  "Beklenen gelir",
+                  sum(
+                    pending.filter((e) => e.kind === "income"),
+                    (e) => e.amount,
+                  ),
+                ],
+                [
+                  "Beklenen gider",
+                  sum(
+                    pending.filter((e) => e.kind === "expense"),
+                    (e) => e.amount,
+                  ),
+                ],
+                [
+                  "Kalan faturalar",
+                  sum(
+                    pending.filter((e) => e.kind === "expense" && isFixed(e)),
+                    (e) => e.amount,
+                  ),
+                ],
+                ["Sabit gider", fixedSpent],
+                ["Değişken gider", monthly.expense - fixedSpent],
+                [
+                  selectedMonthEnd < today
+                    ? "Ay sonu nakit"
+                    : "Ay sonu tahmini nakit",
+                  forecast,
+                ],
               ])}
               <div className="stat">
                 <span>Tasarruf oranı</span>
@@ -1013,6 +1682,29 @@ function App() {
                 </strong>
               </div>
             </div>
+            {panel(
+              "Maaşa kadar",
+              <>
+                <p>
+                  {daysBetween(today, salary.salary) === 0
+                    ? "Maaş günü bugün"
+                    : daysBetween(today, salary.salary).toLocaleString(
+                        "tr-TR",
+                      ) + " gün kaldı"}{" "}
+                  · {dateLabel(salary.salary)}
+                </p>
+                <div className="metrics">
+                  {stats([
+                    ["Borç ve faturalar", salary.required],
+                    [
+                      salary.remaining < 0 ? "Nakit açığı" : "Kalan nakit",
+                      salary.remaining,
+                    ],
+                    ["Günlük bütçe", salary.daily],
+                  ])}
+                </div>
+              </>,
+            )}
             <div className="grid">
               {panel(
                 "Gelir ve gider",
@@ -1067,7 +1759,15 @@ function App() {
                     >
                       <option value="">Tümü</option>
                       {(
-                        ["income", "expense", "transfer", "payment"] as const
+                        [
+                          "income",
+                          "expense",
+                          "transfer",
+                          "payment",
+                          "adjustment",
+                          "trade",
+                          "valuation",
+                        ] as const
                       ).map((k) => (
                         <option value={k} key={k}>
                           {labels[k]}
@@ -1094,16 +1794,70 @@ function App() {
                     </select>
                   </label>
                 </div>
-                {list(
-                  scheduled(rows, rangeEnd, from)
-                    .filter(
-                      (e) =>
-                        (!filter || e.kind === filter) &&
-                        (!category || e.category === category),
-                    )
-                    .sort((a, b) => b.date.localeCompare(a.date)),
-                  "Bu filtreyle eşleşen işlem yok.",
-                  true,
+                <div className="range">
+                  <label>
+                    İşlem ara
+                    <input
+                      type="search"
+                      value={search}
+                      onChange={(e) => setSearch(e.target.value)}
+                    />
+                  </label>
+                  <label>
+                    Ödeme hesabı
+                    <select
+                      value={accountFilter}
+                      onChange={(e) => setAccountFilter(e.target.value)}
+                    >
+                      <option value="">Tümü</option>
+                      {rows
+                        .filter((e) =>
+                          ["account", "card", "deposit"].includes(e.kind),
+                        )
+                        .map((e) => (
+                          <option key={e.id} value={e.id}>
+                            {e.name}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                  <label>
+                    Durum
+                    <select
+                      value={stateFilter}
+                      onChange={(e) => setStateFilter(e.target.value)}
+                    >
+                      <option value="">Tümü</option>
+                      {Object.entries(stateLabels).map(([key, value]) => (
+                        <option value={key} key={key}>
+                          {value}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Gider sınıfı
+                    <select
+                      value={fixedFilter}
+                      onChange={(e) => setFixedFilter(e.target.value)}
+                    >
+                      <option value="">Tümü</option>
+                      <option value="fixed">Sabit</option>
+                      <option value="variable">Değişken</option>
+                    </select>
+                  </label>
+                </div>
+                {transactions.length ? (
+                  [...new Set(transactions.map((e) => e.date))].map((date) => (
+                    <section className="day-group" key={date}>
+                      <h3>{dateLabel(date)}</h3>
+                      {transactions
+                        .filter((e) => e.date === date)
+                        .map((e) => row(e, true))}
+                    </section>
+                  ))
+                ) : (
+                  <p className="empty">Bu filtreyle eşleşen işlem yok.</p>
                 )}
               </>,
             )}
@@ -1121,12 +1875,28 @@ function App() {
                         <strong>{e.name}</strong>
                         <small>
                           {e.amount
-                            ? fmt(spent) + " / " + fmt(e.amount)
+                            ? "Harcanan " +
+                              fmt(spent) +
+                              " · Kalan " +
+                              fmt(e.amount - spent) +
+                              " · Limit " +
+                              fmt(e.amount)
                             : "Limit belirlenmedi"}
                         </small>
                       </span>
-                      {e.amount > 0 && spent > e.amount && (
-                        <span className="error">Limit aşıldı</span>
+                      {visible && e.amount > 0 && (
+                        <progress
+                          aria-label="Bütçe kullanımı"
+                          max={e.amount}
+                          value={Math.min(spent, e.amount)}
+                        />
+                      )}
+                      {e.amount > 0 && spent >= e.amount * 0.8 && (
+                        <span className="error">
+                          {spent >= e.amount
+                            ? "Limit doldu"
+                            : "%80 eşiği geçildi"}
+                        </span>
                       )}
                     </button>
                   ))
@@ -1145,6 +1915,68 @@ function App() {
         )}
         {ready && tab === "Varlıklar" && (
           <>
+            <div className="segment" role="group" aria-label="Varlık türü">
+              {Object.entries({
+                all: "Genel",
+                account: "Bankalar",
+                deposit: "Mevduat",
+                investment: "Yatırımlar",
+                card: "Kredi kartları",
+                goal: "Hedefler",
+              }).map(([key, title]) => (
+                <button
+                  key={key}
+                  aria-pressed={assetTab === key}
+                  onClick={() => setAssetTab(key)}
+                >
+                  {title}
+                </button>
+              ))}
+            </div>
+            {assetTab === "all" &&
+              panel(
+                "Varlık dağılımı",
+                <>
+                  {stats([
+                    ["Toplam varlık", summary.cash + summary.assets],
+                    ["Toplam borç", summary.debt],
+                    ["Net finansal varlık", summary.net],
+                  ])}
+                  {pie([
+                    {
+                      name: "Bankalar",
+                      value: Math.max(0, summary.cash - cashOnHand),
+                    },
+                    { name: "Nakit para", value: Math.max(0, cashOnHand) },
+                    { name: "Mevduat", value: deposits },
+                    { name: "Yatırım", value: investments },
+                  ])}
+                </>,
+              )}
+            {assetTab === "deposit" &&
+              panel(
+                "Faiz hesaplama",
+                <>
+                  <label>
+                    Özel vade (gün)
+                    <input
+                      type="number"
+                      min={1}
+                      max={3650}
+                      value={interestDays}
+                      onChange={(e) =>
+                        setInterestDays(
+                          Math.min(
+                            3650,
+                            Math.max(1, Math.trunc(Number(e.target.value))),
+                          ),
+                        )
+                      }
+                    />
+                  </label>
+                  <InterestComparison fmt={fmt} visible={visible} />
+                </>,
+              )}
             <div className="metrics">
               {stats([
                 ["Nakit", summary.cash],
@@ -1161,220 +1993,522 @@ function App() {
               </button>
             </div>
             <div className="grid">
-              {(
-                ["account", "card", "deposit", "investment", "goal"] as const
-              ).map((kind) => {
-                const items =
-                  kind === "goal"
-                    ? rows
-                        .filter((e) => e.kind === kind)
-                        .map((e) => ({ ...e, balance: e.saved ?? 0 }))
-                    : balances(rows, today).filter((e) => e.kind === kind);
-                return (
-                  <div key={kind}>
-                    {panel(
-                      labels[kind],
-                      items.length ? (
-                        items.map((e) => (
-                          <article className="asset" key={e.id}>
-                            <button
-                              className="entry-row"
-                              onClick={() => open(e)}
+              {(["account", "card", "deposit", "investment", "goal"] as const)
+                .filter((kind) => kind === assetTab)
+                .map((kind) => {
+                  const items =
+                    kind === "goal"
+                      ? rows
+                          .filter((e) => e.kind === kind)
+                          .map((e) => ({ ...e, balance: e.saved ?? 0 }))
+                      : balances(rows, today).filter((e) => e.kind === kind);
+                  return (
+                    <div key={kind}>
+                      {panel(
+                        labels[kind],
+                        items.length ? (
+                          items.map((e) => (
+                            <article
+                              className={"asset asset-" + kind}
+                              data-color={e.color}
+                              key={e.id}
                             >
-                              <span className="row-text">
-                                <strong>{e.name}</strong>
-                              </span>
-                              <strong>{fmt(e.balance)}</strong>
-                              <ChevronRight size={16} />
-                            </button>
-                            {kind === "card" && (
-                              <>
-                                <p>
-                                  Kullanılabilir limit{" "}
-                                  {fmt((e.limit ?? 0) - e.balance)} · Ekstre{" "}
-                                  {fmt(e.statement ?? 0)}
-                                </p>
-                                <p>
-                                  Kesim günü {e.cutDay ?? "—"} · Son ödeme günü{" "}
-                                  {e.dueDay ?? "—"}
-                                </p>
-                                <button
-                                  className="link"
-                                  onClick={() =>
-                                    newEntry("payment", {
-                                      target: e.id,
-                                      amount: Math.max(0, e.balance),
-                                    })
-                                  }
-                                >
-                                  Borç ödemesi kaydet
-                                </button>
-                              </>
-                            )}
-                            {kind === "deposit" && (
-                              <>
-                                <p>
-                                  Vade bitişi{" "}
-                                  {(e.days ?? 0) > 0
-                                    ? dateLabel(addDays(e.date, e.days!))
-                                    : "—"}
-                                </p>
-                                <table>
-                                  <thead>
-                                    <tr>
-                                      <th>Dönem</th>
-                                      <th>Brüt</th>
-                                      <th>Net</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {(
+                              <button
+                                className="entry-row"
+                                onClick={() => open(e)}
+                              >
+                                <span className="row-text">
+                                  <strong>
+                                    {kind === "account" &&
+                                      (e.icon === "cash" ? (
+                                        <Wallet size={16} />
+                                      ) : (
+                                        <Landmark size={16} />
+                                      ))}{" "}
+                                    {e.name}
+                                  </strong>
+                                </span>
+                                <strong>{fmt(e.balance)}</strong>
+                                <ChevronRight size={16} />
+                              </button>
+                              {e.bank && <p>{e.bank}</p>}
+                              {kind === "account" && (
+                                <>
+                                  <button
+                                    className="link"
+                                    onClick={() =>
+                                      newEntry("adjustment", {
+                                        target: e.id,
+                                        name: e.name + " bakiye düzeltmesi",
+                                        amount: e.balance,
+                                      })
+                                    }
+                                  >
+                                    Bakiyeyi düzelt
+                                  </button>
+                                  <details>
+                                    <summary>Hesap hareketleri</summary>
+                                    {list(
                                       [
-                                        ["Günlük", 1],
-                                        ["Aylık", 30],
-                                        ["Yıllık", 365],
-                                        ...(e.days ? [["Vade", e.days]] : []),
-                                      ] as [string, number][]
-                                    ).map(([name, days]) => {
-                                      const i = interest(e, days);
-                                      return (
-                                        <tr key={name}>
-                                          <td>{name}</td>
-                                          <td>{fmt(i.gross)}</td>
-                                          <td>{fmt(i.net)}</td>
-                                        </tr>
-                                      );
-                                    })}
-                                  </tbody>
-                                </table>
-                                <p>
-                                  Kaydedilen faiz{" "}
-                                  {fmt(
-                                    sum(
-                                      completedExpenses.filter(
-                                        (x) =>
-                                          x.kind === "income" &&
-                                          x.category === "Faiz geliri" &&
-                                          x.target === e.id,
-                                      ),
-                                      (x) => x.amount,
-                                    ),
-                                  )}
-                                </p>
-                                <button
-                                  className="link"
-                                  onClick={() =>
-                                    newEntry("income", {
-                                      name: "Mevduat faizi",
-                                      category: "Faiz geliri",
-                                      target: e.id,
-                                    })
-                                  }
-                                >
-                                  Gerçekleşen faizi kaydet
-                                </button>
-                              </>
-                            )}
-                            {kind === "investment" && (
-                              <p>
-                                {e.category} ·{" "}
-                                {e.units?.toLocaleString("tr-TR")} adet ·{" "}
-                                {e.price === undefined
-                                  ? "Maliyet değeri kullanılıyor"
-                                  : "Kâr / zarar " + fmt(market(e) - basis(e))}
-                              </p>
-                            )}
-                            {kind === "goal" && (
-                              <>
-                                <progress max={e.amount} value={e.balance} />
-                                <p>
-                                  %{Math.round((e.balance / e.amount) * 100)} ·
-                                  Hedef {fmt(e.amount)} · {dateLabel(e.date)}
-                                </p>
-                                <p>
-                                  Aylık gerekli birikim{" "}
-                                  {fmt(
-                                    Math.ceil(
-                                      (e.amount - e.balance) /
-                                        Math.max(
-                                          1,
-                                          Math.ceil(
-                                            (Date.parse(e.date) -
-                                              Date.parse(today)) /
-                                              86400000 /
-                                              30,
-                                          ),
+                                        ...scheduled(rows, today),
+                                        ...rows.filter(
+                                          (r) => r.kind === "adjustment",
                                         ),
-                                    ),
+                                      ]
+                                        .filter(
+                                          (r) =>
+                                            r.source === e.id ||
+                                            r.target === e.id,
+                                        )
+                                        .sort((a, b) =>
+                                          b.date.localeCompare(a.date),
+                                        ),
+                                      "Hesap hareketi yok.",
+                                      true,
+                                    )}
+                                  </details>
+                                </>
+                              )}
+                              {kind === "card" &&
+                                e.limit !== undefined &&
+                                e.limit > 0 &&
+                                visible && (
+                                  <p>
+                                    Limit kullanımı {pct(e.balance / e.limit)}
+                                  </p>
+                                )}
+                              {kind === "card" && (
+                                <details>
+                                  <summary>
+                                    Kart geçmişi ve kalan taksitler
+                                  </summary>
+                                  {e.dueDay && (
+                                    <p>
+                                      Son ödeme:{" "}
+                                      {dateLabel(
+                                        nextDayOfMonth(today, e.dueDay),
+                                      )}{" "}
+                                      ·{" "}
+                                      {daysBetween(
+                                        today,
+                                        nextDayOfMonth(today, e.dueDay),
+                                      )}{" "}
+                                      gün
+                                    </p>
                                   )}
+                                  <p>
+                                    Kalan taksit:{" "}
+                                    {
+                                      scheduled(
+                                        rows,
+                                        month(today, 120),
+                                        addDays(today, 1),
+                                      ).filter(
+                                        (r) =>
+                                          r.source === e.id &&
+                                          (r.installments ?? 0) > 1,
+                                      ).length
+                                    }
+                                  </p>
+                                  {list(
+                                    scheduled(rows, month(today, 120))
+                                      .filter(
+                                        (r) =>
+                                          r.source === e.id ||
+                                          r.target === e.id,
+                                      )
+                                      .sort((a, b) =>
+                                        b.date.localeCompare(a.date),
+                                      ),
+                                    "Kart hareketi yok.",
+                                    true,
+                                  )}
+                                </details>
+                              )}
+                              {kind === "investment" && (
+                                <>
+                                  <p>
+                                    Değerleme: {dateLabel(e.priceDate ?? today)}
+                                    {!e.manual &&
+                                      basis(e) > 0 &&
+                                      visible &&
+                                      " · " +
+                                        (
+                                          ((e.balance - basis(e)) / basis(e)) *
+                                          100
+                                        ).toLocaleString("tr-TR", {
+                                          maximumFractionDigits: 2,
+                                        }) +
+                                        "%"}
+                                  </p>
+                                  <button
+                                    className="link"
+                                    onClick={() =>
+                                      newEntry("valuation", {
+                                        target: e.id,
+                                        name: e.name + " değerleme",
+                                        amount: e.balance,
+                                      })
+                                    }
+                                  >
+                                    Geçmiş değer kaydet
+                                  </button>{" "}
+                                  {!e.manual && (
+                                    <button
+                                      className="link"
+                                      onClick={() =>
+                                        newEntry("trade", {
+                                          target: e.id,
+                                          name: e.name + " yatırım hareketi",
+                                          category: "Alım",
+                                        })
+                                      }
+                                    >
+                                      Alım / satım kaydet
+                                    </button>
+                                  )}
+                                  <details>
+                                    <summary>
+                                      Değerlemeler ve hareketler
+                                    </summary>
+                                    {list(
+                                      rows
+                                        .filter(
+                                          (r) =>
+                                            r.target === e.id &&
+                                            ["trade", "valuation"].includes(
+                                              r.kind,
+                                            ),
+                                        )
+                                        .sort((a, b) =>
+                                          b.date.localeCompare(a.date),
+                                        ),
+                                      "Henüz geçmiş kayıt yok.",
+                                    )}
+                                  </details>
+                                </>
+                              )}
+                              {kind === "card" && (
+                                <>
+                                  <p>
+                                    Toplam limit {fmt(e.limit ?? 0)} ·
+                                    Kullanılabilir limit{" "}
+                                    {fmt((e.limit ?? 0) - e.balance)} · Ekstre{" "}
+                                    {fmt(e.statement ?? 0)}
+                                  </p>
+                                  <p>
+                                    Kesim günü {e.cutDay ?? "—"} · Son ödeme
+                                    günü {e.dueDay ?? "—"}
+                                  </p>
+                                  <button
+                                    className="link"
+                                    onClick={() =>
+                                      newEntry("payment", {
+                                        target: e.id,
+                                        amount: Math.max(0, e.balance),
+                                      })
+                                    }
+                                  >
+                                    Borç ödemesi kaydet
+                                  </button>
+                                </>
+                              )}
+                              {kind === "deposit" && (
+                                <>
+                                  <p>
+                                    {e.days ? "Vadeli mevduat" : "Günlük faiz"}{" "}
+                                    ·{" "}
+                                    {e.compound ? "Bileşik faiz" : "Basit faiz"}
+                                  </p>
+                                  {e.days && (
+                                    <p>
+                                      {Math.max(
+                                        0,
+                                        daysBetween(
+                                          today,
+                                          addDays(e.date, e.days),
+                                        ),
+                                      ).toLocaleString("tr-TR")}{" "}
+                                      gün kaldı
+                                    </p>
+                                  )}
+                                  <details>
+                                    <summary>Faiz ve bakiye geçmişi</summary>
+                                    {list(
+                                      scheduled(rows, today)
+                                        .filter(
+                                          (r) =>
+                                            r.target === e.id ||
+                                            r.source === e.id,
+                                        )
+                                        .sort((a, b) =>
+                                          b.date.localeCompare(a.date),
+                                        ),
+                                      "Hareket yok.",
+                                      true,
+                                    )}
+                                  </details>
+                                  <p>
+                                    Vade bitişi{" "}
+                                    {(e.days ?? 0) > 0
+                                      ? dateLabel(addDays(e.date, e.days!))
+                                      : "—"}
+                                  </p>
+                                  <table>
+                                    <thead>
+                                      <tr>
+                                        <th>Dönem</th>
+                                        <th>Brüt</th>
+                                        <th>Net</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {(
+                                        [
+                                          ["Günlük", 1],
+                                          ["7 gün", 7],
+                                          ["30 gün", 30],
+                                          ["32 gün", 32],
+                                          ["90 gün", 90],
+                                          [
+                                            interestDays + " gün (özel)",
+                                            interestDays,
+                                          ],
+                                          ["Yıllık", 365],
+                                          ...(e.days ? [["Vade", e.days]] : []),
+                                        ] as [string, number][]
+                                      ).map(([name, days]) => {
+                                        const i = interest(e, days);
+                                        return (
+                                          <tr key={name}>
+                                            <td>{name}</td>
+                                            <td>{fmt(i.gross)}</td>
+                                            <td>{fmt(i.net)}</td>
+                                          </tr>
+                                        );
+                                      })}
+                                    </tbody>
+                                  </table>
+                                  <p>
+                                    Kaydedilen faiz{" "}
+                                    {fmt(
+                                      sum(
+                                        completedExpenses.filter(
+                                          (x) =>
+                                            x.kind === "income" &&
+                                            x.category === "Faiz geliri" &&
+                                            x.target === e.id,
+                                        ),
+                                        (x) => x.amount,
+                                      ),
+                                    )}
+                                  </p>
+                                  <button
+                                    className="link"
+                                    onClick={() =>
+                                      newEntry("income", {
+                                        name: "Mevduat faizi",
+                                        category: "Faiz geliri",
+                                        target: e.id,
+                                      })
+                                    }
+                                  >
+                                    Gerçekleşen faizi kaydet
+                                  </button>
+                                </>
+                              )}
+                              {kind === "investment" && (
+                                <p>
+                                  {e.manual ? "Toplam portföy" : e.category} ·{" "}
+                                  {visible && !e.manual
+                                    ? e.units?.toLocaleString("tr-TR") + " adet"
+                                    : ""}{" "}
+                                  ·{" "}
+                                  {e.price === undefined
+                                    ? "Maliyet değeri kullanılıyor"
+                                    : "Kâr / zarar " +
+                                      fmt(e.balance - basis(e))}
                                 </p>
-                              </>
-                            )}
-                          </article>
-                        ))
-                      ) : (
-                        <p className="empty">Kayıt yok.</p>
-                      ),
-                      <button
-                        className="link"
-                        onClick={() =>
-                          newEntry(
-                            kind,
-                            kind === "goal" ? { name: "Acil durum fonu" } : {},
-                          )
-                        }
-                      >
-                        Ekle
-                      </button>,
-                    )}
-                  </div>
-                );
-              })}
+                              )}
+                              {kind === "goal" && (
+                                <>
+                                  {visible && (
+                                    <progress
+                                      max={e.amount}
+                                      value={e.balance}
+                                    />
+                                  )}
+                                  <p>
+                                    {pct(e.balance / e.amount)} · Hedef{" "}
+                                    {fmt(e.amount)} · {dateLabel(e.date)}
+                                  </p>
+                                  <p>
+                                    Aylık gerekli birikim{" "}
+                                    {fmt(
+                                      Math.ceil(
+                                        (e.amount - e.balance) /
+                                          Math.max(
+                                            1,
+                                            Math.ceil(
+                                              (Date.parse(e.date) -
+                                                Date.parse(today)) /
+                                                86400000 /
+                                                30,
+                                            ),
+                                          ),
+                                      ),
+                                    )}
+                                  </p>
+                                </>
+                              )}
+                            </article>
+                          ))
+                        ) : (
+                          <p className="empty">Kayıt yok.</p>
+                        ),
+                        <button
+                          className="link"
+                          onClick={() =>
+                            newEntry(
+                              kind,
+                              kind === "goal"
+                                ? { name: "Acil durum fonu" }
+                                : {},
+                            )
+                          }
+                        >
+                          Ekle
+                        </button>,
+                      )}
+                    </div>
+                  );
+                })}
             </div>
-            {panel(
-              "Portföy dağılımı",
-              <>
-                {pie(portfolioData)}
-                <p>
-                  Toplam maliyet {fmt(sum(portfolio, basis))} · Değer farkı{" "}
-                  {fmt(sum(portfolio, (e) => market(e) - basis(e)))}
-                </p>
-              </>,
-            )}
+            {assetTab === "investment" &&
+              panel(
+                "Portföy dağılımı",
+                <>
+                  {pie(portfolioData)}
+                  <p>
+                    Toplam maliyet {fmt(sum(portfolio, basis))} · Değer farkı{" "}
+                    {fmt(
+                      sum(portfolio, (e) =>
+                        e.manual ? 0 : e.balance - basis(e),
+                      ),
+                    )}
+                  </p>
+                </>,
+              )}
           </>
         )}
         {ready && tab === "Raporlar" && (
           <>
-            {panel("Rapor dönemi", range)}
+            {panel(
+              "Rapor dönemi",
+              <>
+                <div className="segment">
+                  {[1, 3, 6, 12].map((n) => (
+                    <button
+                      key={n}
+                      onClick={() => {
+                        setFrom(month(start, 1 - n));
+                        setTo(today);
+                        setPeriod(n);
+                      }}
+                    >
+                      {n} ay
+                    </button>
+                  ))}
+                </div>
+                {range}
+                <div className="quick">
+                  <button onClick={reportExcel}>Rapor Excel</button>
+                  <button
+                    onClick={() =>
+                      run(async () =>
+                        download(
+                          "Finans360-rapor.pdf",
+                          await exportPdf(rows, from, actualEnd),
+                        ),
+                      )
+                    }
+                  >
+                    Rapor PDF
+                  </button>
+                </div>
+              </>,
+            )}
             <div className="metrics">
               {stats([
                 ["Gelir", selected.income],
                 ["Gider", selected.expense],
-                ["Nakit", summary.cash],
-                ["Borç", summary.debt],
-                ["Birikim ve yatırım", summary.assets],
+                ["Gelir eksi gider", selected.income - selected.expense],
+                [
+                  "Günlük ortalama gider",
+                  Math.round(
+                    selected.expense /
+                      Math.max(1, daysBetween(from, actualEnd) + 1),
+                  ),
+                ],
+                ["Gerçekleşen mevduat faizi", realizedInterest],
               ])}
               <div className="stat">
-                <span>Aylık / yıllık tasarruf oranı</span>
+                <span>Tasarruf oranı</span>
                 <strong>
-                  {visible
-                    ? "%" +
-                      monthly.rate.toFixed(1) +
-                      " / %" +
-                      yearly.rate.toFixed(1)
-                    : "••••"}
+                  {selected.income ? pct(selected.rate / 100) : "Veri yok"}
+                </strong>
+              </div>
+              <div className="stat">
+                <span>Gelirin harcanan payı</span>
+                <strong>
+                  {selected.income
+                    ? pct(selected.expense / selected.income)
+                    : "Veri yok"}
+                </strong>
+              </div>
+              <div className="stat">
+                <span>Kira / maaş</span>
+                <strong>
+                  {salaryIncome ? pct(rent / salaryIncome) : "Veri yok"}
+                </strong>
+              </div>
+              <div className="stat">
+                <span>Önceki aya göre gider farkı</span>
+                <strong>
+                  {priorSpend
+                    ? pct((comparisonSpend - priorSpend) / priorSpend)
+                    : "Veri yok"}
                 </strong>
               </div>
             </div>
             <div className="grid">
               {panel(
-                "Gelir ve gider dağılımı",
-                pie([
-                  { name: "Gelir", value: selected.income },
-                  { name: "Gider", value: selected.expense },
-                ]),
+                "Gelirin kullanımı",
+                selected.expense > selected.income ? (
+                  <p className="negative">
+                    Gider geliri {fmt(selected.expense - selected.income)} aştı.
+                  </p>
+                ) : (
+                  pie([
+                    {
+                      name: "Harcanan gelir",
+                      value: Math.min(selected.income, selected.expense),
+                    },
+                    {
+                      name: "Kalan gelir",
+                      value: Math.max(0, selected.income - selected.expense),
+                    },
+                  ])
+                ),
               )}
               {panel("Kategori dağılımı", pie(byCategory))}
+              {panel(
+                "Sabit ve değişken gider",
+                pie([
+                  { name: "Sabit", value: reportFixed },
+                  { name: "Değişken", value: selected.expense - reportFixed },
+                ]),
+              )}
             </div>
             {panel(
               "Aylık karşılaştırma",
@@ -1384,11 +2518,26 @@ function App() {
                 value={period}
                 onChange={(e) => setPeriod(Number(e.target.value))}
               >
+                <option value={1}>1 ay</option>
+                <option value={3}>3 ay</option>
                 <option value={6}>6 ay</option>
                 <option value={12}>12 ay</option>
               </select>,
             )}
             {panel("Birikim büyümesi", chart("saving"))}
+            {panel("Yatırım geçmişi", chart("investment"))}
+            {panel("Net varlık geçmişi", chart("net"))}
+            {panel("Kredi kartı borcu geçmişi", chart("debt"))}
+            {panel(
+              "12 aylık net birikim tahmini",
+              <>
+                {chart("projection")}
+                <small>
+                  Kayıtlı planları kullanır. Gelecekteki faiz ve piyasa
+                  getirilerini içermez.
+                </small>
+              </>,
+            )}
             {panel(
               "En yüksek harcama kategorileri",
               byCategory.length ? (
@@ -1424,37 +2573,129 @@ function App() {
             )}
           </>
         )}
-        {ready &&
-          tab === "Takvim" &&
-          panel(
-            "Ödeme takvimi",
-            <>
-              {range}
-              <div className="range">
-                <label>
-                  Ödeme durumu
-                  <select
-                    value={paymentFilter}
-                    onChange={(e) => setPaymentFilter(e.target.value)}
+        {ready && tab === "Takvim" && (
+          <>
+            {panel(
+              "Ödeme takvimi",
+              <>
+                <MonthPicker value={calendarStart} onChange={changeMonth} />
+                <div className="segment">
+                  <button
+                    aria-pressed={!calendarList}
+                    onClick={() => setCalendarList(false)}
                   >
-                    <option value="">Tümü</option>
-                    <option value="paid">Ödendi</option>
-                    <option value="pending">Bekliyor</option>
-                  </select>
-                </label>
-              </div>
-              {list(
-                upcoming(from, rangeEnd).filter(
-                  (e) =>
-                    !paymentFilter ||
-                    (e.kind === "expense" && completed(e)) ===
-                      (paymentFilter === "paid"),
-                ),
-                "Bu dönemde ödeme veya vade kaydı yok.",
-                true,
-              )}
-            </>,
-          )}
+                    Takvim
+                  </button>
+                  <button
+                    aria-pressed={calendarList}
+                    onClick={() => setCalendarList(true)}
+                  >
+                    Liste
+                  </button>
+                </div>
+                {!calendarList && (
+                  <div className="calendar">
+                    {["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"].map(
+                      (d) => (
+                        <span key={d}>{d}</span>
+                      ),
+                    )}
+                    {Array.from({ length: firstWeekday }, (_, i) => (
+                      <span key={"gap" + i} />
+                    ))}
+                    {Array.from(
+                      { length: Number(calendarEnd.slice(-2)) },
+                      (_, i) => {
+                        const date = dateInMonth(calendarStart, i + 1);
+                        const items = events.filter((e) => e.date === date);
+                        return (
+                          <button
+                            type="button"
+                            key={date}
+                            aria-label={
+                              dateLabel(date) + ", " + items.length + " kayıt"
+                            }
+                            aria-current={date === today ? "date" : undefined}
+                            aria-pressed={date === calendarDate}
+                            onClick={() => setCalendarDate(date)}
+                          >
+                            {i + 1}
+                            <span className="calendar-dots">
+                              {[
+                                ...new Set(
+                                  items.map((e) =>
+                                    isFlow(e) ? statusOf(e, today) : "event",
+                                  ),
+                                ),
+                              ].map((status) => (
+                                <i
+                                  key={status}
+                                  className={"status-" + status}
+                                />
+                              ))}
+                            </span>
+                          </button>
+                        );
+                      },
+                    )}
+                  </div>
+                )}
+                <div className="range">
+                  <label>
+                    Ödeme durumu
+                    <select
+                      value={paymentFilter}
+                      onChange={(e) => setPaymentFilter(e.target.value)}
+                    >
+                      <option value="">Tümü</option>
+                      {Object.entries(stateLabels).map(([key, value]) => (
+                        <option value={key} key={key}>
+                          {value}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                {!calendarList && <p>{dateLabel(calendarDate)}</p>}
+                {list(
+                  events.filter(
+                    (e) =>
+                      (calendarList || e.date === calendarDate) &&
+                      (!paymentFilter ||
+                        (isFlow(e) && statusOf(e, today) === paymentFilter)),
+                  ),
+                  "Bu görünümde kayıt yok.",
+                  true,
+                )}
+              </>,
+              <button
+                className="link"
+                onClick={() =>
+                  newEntry("expense", { date: calendarDate, paid: false })
+                }
+              >
+                Gider ekle
+              </button>,
+            )}
+            {panel(
+              "Bekleyen ödemeler",
+              <div className="metrics">
+                {stats([
+                  ["7 gün", upcomingPay(7)],
+                  ["30 gün", upcomingPay(30)],
+                  ["Gecikmiş", overduePay],
+                  [
+                    "Bu ay bekleyen faturalar",
+                    sum(
+                      unfulfilled(calendarStart, calendarEnd),
+                      (e) => e.amount,
+                    ),
+                  ],
+                ])}
+              </div>,
+            )}
+          </>
+        )}
         {ready && tab === "Ayarlar" && (
           <>
             {panel(
@@ -1474,7 +2715,74 @@ function App() {
                     ? "Örnek verileri aç"
                     : "Kişisel kayıtlara dön"}
                 </button>
-                <p>Türkçe · Türk lirası</p>
+                <p>Finans360 2.0.0 · Türkçe · Türk lirası</p>
+              </div>,
+            )}
+            {panel(
+              "Bütçe ayarları",
+              <label>
+                Maaş günü
+                <select
+                  value={salaryDay}
+                  onChange={(e) => {
+                    const value = Number(e.target.value);
+                    setSalaryDay(value);
+                    localStorage.setItem("finans360-salary", String(value));
+                  }}
+                >
+                  {Array.from({ length: 31 }, (_, i) => (
+                    <option key={i} value={i + 1}>
+                      {i + 1}
+                    </option>
+                  ))}
+                </select>
+              </label>,
+            )}
+            {panel(
+              "Uygulama kilidi",
+              <div className="settings">
+                <p>
+                  PIN ekranı finansal verileri şifrelemez. Uygulama arka plana
+                  geçtiğinde veya 3 dakika kullanılmadığında kilitlenir.
+                </p>
+                <form
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const form = event.currentTarget;
+                    const value = String(new FormData(form).get("pin") ?? "");
+                    run(async () => {
+                      if (pin) {
+                        await reveal(value, pin);
+                        localStorage.removeItem("finans360-lock");
+                        setPin("");
+                      } else {
+                        const valueProtected = await protect(
+                          value,
+                          "Finans360",
+                        );
+                        localStorage.setItem("finans360-lock", valueProtected);
+                        setPin(valueProtected);
+                      }
+                      form.reset();
+                    });
+                  }}
+                >
+                  <label>
+                    {pin ? "Mevcut PIN" : "Yeni PIN"}
+                    <input
+                      type="password"
+                      inputMode="numeric"
+                      autoComplete="off"
+                      name="pin"
+                      pattern="[0-9]{6,12}"
+                      required
+                      placeholder="6–12 rakam"
+                    />
+                  </label>
+                  <button type="submit">
+                    {pin ? "Kilidi kaldır" : "Uygulama kilidini aç"}
+                  </button>
+                </form>
               </div>,
             )}
             {panel(
@@ -1516,7 +2824,10 @@ function App() {
                           "Kaynak",
                           "Hedef",
                           "Tamamlandı",
-                          "Aylık tekrar",
+                          "Tekrar",
+                          "Banka",
+                          "Değerleme tarihi",
+                          "Açılış bakiyesi tarihi",
                           "Taksit",
                           "Limit (₺)",
                           "Ekstre (₺)",
@@ -1542,7 +2853,17 @@ function App() {
                             rows.find((r) => r.id === e.source)?.name,
                             rows.find((r) => r.id === e.target)?.name,
                             isFlow(e) ? completed(e) : undefined,
-                            e.recurring,
+                            e.recurring
+                              ? {
+                                  weekly: "Haftalık",
+                                  monthly: "Aylık",
+                                  quarterly: "Üç aylık",
+                                  yearly: "Yıllık",
+                                }[e.frequency ?? "monthly"]
+                              : undefined,
+                            e.bank,
+                            e.priceDate,
+                            e.balanceFrom,
                             e.installments,
                             lira(e.limit),
                             lira(e.statement),
@@ -1572,6 +2893,51 @@ function App() {
                 >
                   Excel dosyası indir
                 </button>
+                <form
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const form = event.currentTarget;
+                    const password = String(
+                      new FormData(form).get("password") ?? "",
+                    );
+                    run(async () => {
+                      const encrypted = await protect(
+                        password,
+                        JSON.stringify({ version: 1, mode, records: rows }),
+                      );
+                      download(
+                        "finans360-sifreli.json",
+                        new Blob([encrypted], { type: "application/json" }),
+                      );
+                      form.reset();
+                    });
+                  }}
+                >
+                  <label>
+                    Yedek parolası
+                    <input
+                      type="password"
+                      name="password"
+                      minLength={10}
+                      maxLength={256}
+                      required
+                      autoComplete="new-password"
+                    />
+                  </label>
+                  <button type="submit">Şifreli JSON yedeği indir</button>
+                  <p>
+                    Yedek hassas finansal bilgiler içerir. Şifreli yedeğin
+                    parolasını unutursanız dosyayı açamazsınız.
+                  </p>
+                </form>
+                <label>
+                  Geri yükleme parolası (şifreli yedek için)
+                  <input
+                    type="password"
+                    id="restore-password"
+                    autoComplete="off"
+                  />
+                </label>
                 <label className="upload">
                   JSON yedeğinden geri yükle
                   <input
@@ -1582,7 +2948,22 @@ function App() {
                       event.target.value = "";
                       if (file)
                         run(async () => {
-                          const raw = await file.text();
+                          if (file.size > 20 * 1024 * 1024)
+                            throw new Error(
+                              "Yedek dosyası 20 MB sınırını aşıyor.",
+                            );
+                          let raw = await file.text();
+                          if (JSON.parse(raw)?.encrypted === 1) {
+                            const input = document.getElementById(
+                              "restore-password",
+                            ) as HTMLInputElement | null;
+                            if (!input?.value)
+                              throw new Error(
+                                "Şifreli yedeğin parolasını girin.",
+                              );
+                            raw = await reveal(input.value, raw);
+                            input.value = "";
+                          }
                           const data = backup(raw);
                           const fileMode = JSON.parse(raw).mode;
                           if (fileMode && fileMode !== mode)
@@ -1670,12 +3051,52 @@ function App() {
           entry={entry}
           rows={rows}
           close={() => setEntry(undefined)}
-          save={(e) =>
-            mutate((data) =>
-              data.some((row) => row.id === e.id)
-                ? data.map((row) => (row.id === e.id ? e : row))
-                : [...data, e],
-            )
+          occurrence={Boolean(occurrence)}
+          save={(e, scope) =>
+            mutate((data) => {
+              if (occurrence) {
+                const original = data.find((row) => row.id === occurrence.id);
+                if (!original) throw new Error("Tekrarlanan kayıt bulunamadı.");
+                return reviseOccurrence(
+                  data,
+                  original,
+                  occurrence.date,
+                  { ...e, id: crypto.randomUUID(), createdAt: Date.now() },
+                  scope,
+                );
+              }
+              const previous = data.find((row) => row.id === e.id);
+              const history: Data =
+                previous?.kind === "investment" &&
+                previous.priceDate &&
+                e.priceDate &&
+                previous.priceDate < e.priceDate
+                  ? [
+                      {
+                        id: crypto.randomUUID(),
+                        kind: "valuation",
+                        name: previous.name + " değerleme",
+                        target: e.id,
+                        date: previous.priceDate,
+                        amount: market(previous),
+                        createdAt: Date.now(),
+                      },
+                    ]
+                  : [];
+              return previous
+                ? [
+                    ...data.map((row) =>
+                      row.id === e.id
+                        ? e
+                        : previous.kind === "budget" &&
+                            row.category === previous.name
+                          ? { ...row, category: e.name }
+                          : row,
+                    ),
+                    ...history,
+                  ]
+                : [...data, e];
+            })
           }
           remove={(e) =>
             mutate((data) => {
@@ -1684,6 +3105,20 @@ function App() {
               )
                 throw new Error(
                   "Önce bu hesaba bağlı işlemleri kaldırın veya başka hesaba taşıyın.",
+                );
+              if (occurrence)
+                return data.map((row) =>
+                  row.id === e.id
+                    ? {
+                        ...row,
+                        exceptions: [
+                          ...new Set([
+                            ...(row.exceptions ?? []),
+                            occurrence.date,
+                          ]),
+                        ],
+                      }
+                    : row,
                 );
               return data.filter((row) => row.id !== e.id);
             })
@@ -1694,9 +3129,3 @@ function App() {
   );
 }
 createRoot(document.getElementById("root")!).render(<App />);
-if (import.meta.env.PROD && "serviceWorker" in navigator)
-  window.addEventListener("load", () => {
-    void navigator.serviceWorker
-      .register(import.meta.env.BASE_URL + "sw.js")
-      .catch((error) => console.error("Çevrimdışı kurulum başarısız:", error));
-  });
